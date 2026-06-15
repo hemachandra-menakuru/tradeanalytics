@@ -1,0 +1,25 @@
+bundle:
+  name: tradeanalytics
+
+variables:
+  env:
+    description: Deployment environment
+    default: dev
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://handh-trade-dbx-prod.azuredatabricks.net
+    variables:
+      env: dev
+
+  prod:
+    mode: production
+    workspace:
+      host: https://handh-trade-dbx-prod.azuredatabricks.net
+    variables:
+      env: prod
+    run_as:
+      user_name: handh.stocks@gmail.com

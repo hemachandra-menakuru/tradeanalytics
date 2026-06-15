@@ -1,0 +1,29 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+.venv/
+venv/
+
+# Databricks
+.databricks/
+bundle.lock
+
+# Secrets — never commit these
+*.env
+secrets.yml
+config/prod.yml
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+logs/
