@@ -1,0 +1,38 @@
+environment: dev
+aws:
+  region: us-east-1
+  account_id: "311925399625"
+  s3:
+    raw: handh-trade-raw-use1
+    refined: handh-trade-refined-use1
+    mlflow: handh-trade-mlflow-use1
+    dbx_root: handh-trade-dbx-root-use1
+
+databricks:
+  workspace: handh-trade-dbx-prod
+  catalog: handh_trade
+  schemas:
+    bronze: bronze
+    silver: silver
+    gold: gold
+    feature_store: feature_store
+    mlflow: mlflow
+
+data:
+  source: yahoo_finance
+  tickers:
+    - AAPL
+    - MSFT
+    - NVDA
+    - SPY
+    - QQQ
+  lookback_days: 365
+
+ml:
+  mlflow_experiment: /tradeanalytics/dev/experiments
+  model_registry: handh-trade-model-registry
+
+cluster:
+  instance_type: m5.xlarge
+  spot: true
+  auto_terminate_minutes: 20
