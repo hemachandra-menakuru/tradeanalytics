@@ -11,15 +11,7 @@ targets:
     mode: development
     default: true
     workspace:
-      host: https://handh-trade-dbx-prod.azuredatabricks.net
+      host: https://dbc-bf0075e6-07aa.cloud.databricks.com
+      profile: handh-trade-aws
     variables:
       env: dev
-
-  prod:
-    mode: production
-    workspace:
-      host: https://handh-trade-dbx-prod.azuredatabricks.net
-    variables:
-      env: prod
-    run_as:
-      user_name: handh.stocks@gmail.com
