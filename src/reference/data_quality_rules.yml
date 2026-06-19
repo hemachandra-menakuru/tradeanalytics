@@ -1,0 +1,58 @@
+quality_rules:
+  ohlcv:
+    - rule: high_gte_low
+      description: High must be >= Low
+      severity: critical
+      action: reject_record
+
+    - rule: high_gte_open
+      description: High must be >= Open
+      severity: critical
+      action: reject_record
+
+    - rule: high_gte_close
+      description: High must be >= Close
+      severity: critical
+      action: reject_record
+
+    - rule: low_lte_open
+      description: Low must be <= Open
+      severity: critical
+      action: reject_record
+
+    - rule: low_lte_close
+      description: Low must be <= Close
+      severity: critical
+      action: reject_record
+
+    - rule: volume_positive
+      description: Volume must be > 0
+      severity: warning
+      action: flag_record
+
+    - rule: price_positive
+      description: All prices must be > 0
+      severity: critical
+      action: reject_record
+
+    - rule: no_weekend_dates
+      description: No records on Saturday or Sunday
+      severity: critical
+      action: reject_record
+
+    - rule: price_change_pct_threshold
+      description: Single-day price change > 50% flagged for review
+      severity: warning
+      action: flag_record
+      threshold: 50.0
+
+    - rule: no_null_ohlcv
+      description: No null values in OHLCV fields
+      severity: critical
+      action: reject_record
+
+    - rule: max_consecutive_missing_days
+      description: Alert if more than 5 consecutive trading days missing
+      severity: warning
+      action: alert
+      threshold: 5

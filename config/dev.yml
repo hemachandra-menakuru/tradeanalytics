@@ -1,4 +1,5 @@
 environment: dev
+
 aws:
   region: us-east-1
   account_id: "311925399625"
@@ -9,30 +10,39 @@ aws:
     dbx_root: handh-trade-dbx-root-use1
 
 databricks:
-  workspace: handh-trade-dbx-prod
+  workspace: https://dbc-bf0075e6-07aa.cloud.databricks.com
   catalog: handh_trade
   schemas:
     bronze: bronze
     silver: silver
     gold: gold
     feature_store: feature_store
-    mlflow: mlflow
+
+ibkr:
+  base_url: https://localhost:5000/v1/api
+  verify_ssl: false
+  timeout_seconds: 30
+  max_retries: 3
+  retry_delay_seconds: 2
 
 data:
-  source: yahoo_finance
-  tickers:
-    - AAPL
-    - MSFT
-    - NVDA
-    - SPY
-    - QQQ
+  source: ibkr
+  fallback_source: yahoo_finance
   lookback_days: 365
+  intervals:
+    - 1d
+    - 1h
+  market_open: "09:30"
+  market_close: "16:00"
+  timezone: "America/New_York"
 
-ml:
-  mlflow_experiment: /tradeanalytics/dev/experiments
-  model_registry: handh-trade-model-registry
+mlflow:
+  experiment_base: /tradeanalytics/dev
+  tracking_uri: databricks
 
 cluster:
   instance_type: m5.xlarge
   spot: true
   auto_terminate_minutes: 20
+  min_workers: 1
+  max_workers: 4

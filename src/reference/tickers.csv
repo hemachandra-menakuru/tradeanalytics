@@ -1,0 +1,9 @@
+symbol,name,sector,asset_class,active,added_date,min_price,market_cap_tier,notes
+AAPL,Apple Inc,Technology,equity,true,2026-06-19,5.00,large,Core holding
+MSFT,Microsoft Corp,Technology,equity,true,2026-06-19,5.00,large,Core holding
+NVDA,NVIDIA Corp,Technology,equity,true,2026-06-19,5.00,large,High volatility
+GOOGL,Alphabet Inc,Technology,equity,true,2026-06-19,5.00,large,Core holding
+AMZN,Amazon.com Inc,Consumer Discretionary,equity,true,2026-06-19,5.00,large,Core holding
+JPM,JPMorgan Chase,Financials,equity,true,2026-06-19,5.00,large,Sector diversification
+SPY,S&P 500 ETF,ETF,etf,true,2026-06-19,5.00,large,Market benchmark
+QQQ,Nasdaq 100 ETF,ETF,etf,true,2026-06-19,5.00,large,Tech benchmark
