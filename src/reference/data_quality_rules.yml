@@ -56,3 +56,40 @@ quality_rules:
       severity: warning
       action: alert
       threshold: 5
+
+    - rule: vwap_between_low_and_high
+      description: VWAP must be between session low and high
+      severity: critical
+      action: reject_record
+
+    - rule: prev_close_positive
+      description: Previous close must be positive
+      severity: critical
+      action: reject_record
+
+    - rule: trade_count_positive
+      description: Trade count should be positive on active trading days
+      severity: warning
+      action: flag_record
+
+    - rule: gap_threshold
+      description: Gap > 15% between prev_close and open flagged for review
+      severity: warning
+      action: flag_record
+      threshold: 15.0
+
+    - rule: amended_record_detected
+      description: Record is an amendment of a previously stored record
+      severity: warning
+      action: flag_record
+
+    - rule: fetch_duration_threshold
+      description: API fetch took > 30 seconds — possible data quality issue
+      severity: warning
+      action: flag_record
+      threshold: 30000
+
+    - rule: pre_market_volume_non_negative
+      description: Pre-market volume cannot be negative
+      severity: critical
+      action: reject_record
