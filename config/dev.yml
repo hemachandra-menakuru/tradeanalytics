@@ -27,7 +27,7 @@ ibkr:
 
 data:
   source: ibkr
-  fallback_source: yahoo_finance
+  fallback_source: yahoo
   lookback_days: 365
   intervals:
     - 1d

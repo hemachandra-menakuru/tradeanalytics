@@ -77,7 +77,7 @@ def test_databricks_schemas():
 def test_data_source_is_ibkr():
     config = ConfigLoader.load(environment="dev", repo_root=REPO_ROOT)
     assert config.data.source == "ibkr"
-    assert config.data.fallback_source == "yahoo_finance"
+    assert config.data.fallback_source == "yahoo"
 
 
 def test_data_timezone():
