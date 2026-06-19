@@ -209,6 +209,7 @@ class ConfigLoader:
         # ── Add new config files here as the project grows ──────────────────
         config_files = [
             ("infrastructure", root / "config" / f"{env}.yml"),
+            ("data",           root / "config" / "data.yml"),
             ("risk",           root / "config" / "risk.yml"),
             ("logging",        root / "config" / "logging.yml"),
             # Phase 3: ("indicators",    root / "config" / "indicators.yml"),

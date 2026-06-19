@@ -1,3 +1,7 @@
+# TradeAnalytics — Infrastructure Configuration
+# Environment-specific settings: endpoints, buckets, cluster, connections
+# Does NOT contain business logic, data config, or risk parameters
+
 environment: dev
 
 aws:
@@ -24,17 +28,6 @@ ibkr:
   timeout_seconds: 30
   max_retries: 3
   retry_delay_seconds: 2
-
-data:
-  source: ibkr
-  fallback_source: yahoo
-  lookback_days: 365
-  intervals:
-    - 1d
-    - 1h
-  market_open: "09:30"
-  market_close: "16:00"
-  timezone: "America/New_York"
 
 mlflow:
   experiment_base: /tradeanalytics/dev
