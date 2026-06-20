@@ -1,6 +1,8 @@
-# TradeAnalytics — Infrastructure Configuration
-# Environment-specific settings: endpoints, buckets, cluster, connections
-# Does NOT contain business logic, data config, or risk parameters
+# TradeAnalytics — Infrastructure Configuration (dev)
+# Environment-specific: endpoints, buckets, cluster
+# Data sources → config/sources.yml
+# Stream configs → config/streams/*.yml
+# Risk → config/risk.yml
 
 environment: dev
 
@@ -21,13 +23,6 @@ databricks:
     silver: silver
     gold: gold
     feature_store: feature_store
-
-ibkr:
-  base_url: https://localhost:5000/v1/api
-  verify_ssl: false
-  timeout_seconds: 30
-  max_retries: 3
-  retry_delay_seconds: 2
 
 mlflow:
   experiment_base: /tradeanalytics/dev

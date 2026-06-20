@@ -11,7 +11,15 @@ RULES_PATH = Path(__file__).resolve().parents[3] / "src" / "reference" / "data_q
 
 @pytest.fixture
 def engine():
-    return RuleEngine(RULES_PATH)
+    # Load shared rules + daily additional rules (includes no_weekend_dates)
+    return RuleEngine(
+        RULES_PATH,
+        stream_name="daily",
+        additional_rules=[
+            {"rule": "no_weekend_dates", "severity": "critical", "action": "reject_record"},
+            {"rule": "vwap_between_low_and_high", "severity": "critical", "action": "reject_record"},
+        ],
+    )
 
 
 @pytest.fixture

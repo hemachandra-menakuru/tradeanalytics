@@ -1,30 +1,32 @@
 """
 TradeAnalytics Data Quality Rule Engine
 ========================================
-Reads rules from config/data_quality_rules.yml and applies them
-to raw OHLCV records. Returns RuleResult per rule per record.
+Loads rules from data_quality_rules.yml and applies them to raw OHLCV records.
+Supports tiered rules (shared + stream-specific) and per-stream threshold overrides.
 
-Design principles:
-  - Rules are data (YAML) — adding a new rule needs no code change
-  - Each rule is a pure function: (record, rule_config) → RuleResult
-  - Rule functions registered in _RULE_REGISTRY dict
-  - Unknown rules in YAML raise at startup — fail fast
-  - All rule functions receive the full raw dict — no assumptions about types
+Rule loading order:
+  1. shared rules — always applied to all streams
+  2. stream additional_rules — from streams/*.yml validation.additional_rules
+  3. stream disabled_rules — shared rules disabled for this stream
+
+Threshold resolution:
+  1. Stream config validation.thresholds (highest priority)
+  2. Rule default threshold from data_quality_rules.yml (fallback)
 
 Adding a new rule:
-  1. Add the rule definition to config/data_quality_rules.yml
-  2. Add a function named _rule_{rule_name} below
-  3. Register it in _RULE_REGISTRY at bottom of file
-  4. Add a test in tests/ingestion/validation/test_rule_engine.py
+  1. Add definition to data_quality_rules.yml under shared or stream section
+  2. Implement _rule_{name} function below
+  3. Register in _RULE_REGISTRY
+  4. Add threshold override in streams/*.yml if threshold differs per stream
+  5. Add test in tests/ingestion/validation/test_rule_engine.py
 """
 
 from __future__ import annotations
 
 import logging
 import yaml
-from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from src.ingestion.validation.models import (
     RuleResult, RuleSeverity, RuleAction, ValidationOutcome
@@ -32,22 +34,20 @@ from src.ingestion.validation.models import (
 
 logger = logging.getLogger(__name__)
 
-# Tolerance for float comparisons (avoid false failures from float precision)
 _FLOAT_TOLERANCE = 1e-9
 
 
 # ── Rule functions ─────────────────────────────────────────────────────────────
-# Each function signature: (record: dict, rule_cfg: dict) -> Optional[str]
-# Returns: None if rule PASSES, error message string if rule FAILS
+# Each: (record: dict, rule_cfg: dict) -> Optional[str]
+# Returns None if PASSES, error message string if FAILS
 
 def _rule_high_gte_low(record: dict, cfg: dict) -> Optional[str]:
     high, low = record.get("high"), record.get("low")
     if high is None or low is None:
-        return None  # null check handled by no_null_ohlcv rule
+        return None
     if high < low - _FLOAT_TOLERANCE:
         return f"High ({high}) must be >= Low ({low})"
     return None
-
 
 def _rule_high_gte_open(record: dict, cfg: dict) -> Optional[str]:
     high, open_ = record.get("high"), record.get("open")
@@ -57,7 +57,6 @@ def _rule_high_gte_open(record: dict, cfg: dict) -> Optional[str]:
         return f"High ({high}) must be >= Open ({open_})"
     return None
 
-
 def _rule_high_gte_close(record: dict, cfg: dict) -> Optional[str]:
     high, close = record.get("high"), record.get("close")
     if high is None or close is None:
@@ -65,7 +64,6 @@ def _rule_high_gte_close(record: dict, cfg: dict) -> Optional[str]:
     if high < close - _FLOAT_TOLERANCE:
         return f"High ({high}) must be >= Close ({close})"
     return None
-
 
 def _rule_low_lte_open(record: dict, cfg: dict) -> Optional[str]:
     low, open_ = record.get("low"), record.get("open")
@@ -75,7 +73,6 @@ def _rule_low_lte_open(record: dict, cfg: dict) -> Optional[str]:
         return f"Low ({low}) must be <= Open ({open_})"
     return None
 
-
 def _rule_low_lte_close(record: dict, cfg: dict) -> Optional[str]:
     low, close = record.get("low"), record.get("close")
     if low is None or close is None:
@@ -83,7 +80,6 @@ def _rule_low_lte_close(record: dict, cfg: dict) -> Optional[str]:
     if low > close + _FLOAT_TOLERANCE:
         return f"Low ({low}) must be <= Close ({close})"
     return None
-
 
 def _rule_volume_positive(record: dict, cfg: dict) -> Optional[str]:
     volume = record.get("volume")
@@ -93,14 +89,12 @@ def _rule_volume_positive(record: dict, cfg: dict) -> Optional[str]:
         return f"Volume ({volume}) must be > 0"
     return None
 
-
 def _rule_price_positive(record: dict, cfg: dict) -> Optional[str]:
     for field in ("open", "high", "low", "close"):
         value = record.get(field)
         if value is not None and value <= 0:
             return f"{field.capitalize()} price ({value}) must be > 0"
     return None
-
 
 def _rule_no_weekend_dates(record: dict, cfg: dict) -> Optional[str]:
     date_val = record.get("date")
@@ -110,14 +104,12 @@ def _rule_no_weekend_dates(record: dict, cfg: dict) -> Optional[str]:
         if isinstance(date_val, str):
             from datetime import date
             date_val = date.fromisoformat(date_val)
-        # weekday(): 5=Saturday, 6=Sunday
         if date_val.weekday() in (5, 6):
             day_name = "Saturday" if date_val.weekday() == 5 else "Sunday"
             return f"Date {date_val} falls on a {day_name} — markets closed"
     except (ValueError, AttributeError):
         return f"Cannot parse date: {repr(date_val)}"
     return None
-
 
 def _rule_price_change_pct_threshold(record: dict, cfg: dict) -> Optional[str]:
     prev_close = record.get("prev_close")
@@ -129,10 +121,9 @@ def _rule_price_change_pct_threshold(record: dict, cfg: dict) -> Optional[str]:
     if change_pct > threshold:
         return (
             f"Price change {change_pct:.1f}% exceeds threshold {threshold}% "
-            f"(prev_close={prev_close}, close={close}) — review for split/error"
+            f"(prev_close={prev_close}, close={close})"
         )
     return None
-
 
 def _rule_no_null_ohlcv(record: dict, cfg: dict) -> Optional[str]:
     for field in ("open", "high", "low", "close", "volume"):
@@ -140,12 +131,8 @@ def _rule_no_null_ohlcv(record: dict, cfg: dict) -> Optional[str]:
             return f"Required field '{field}' is null"
     return None
 
-
 def _rule_max_consecutive_missing_days(record: dict, cfg: dict) -> Optional[str]:
-    # This is a batch-level rule — not applicable per-record
-    # Handled separately in DataQualityValidator.check_continuity()
-    return None
-
+    return None  # batch-level rule — handled in DataQualityValidator
 
 def _rule_vwap_between_low_and_high(record: dict, cfg: dict) -> Optional[str]:
     vwap = record.get("vwap")
@@ -157,7 +144,6 @@ def _rule_vwap_between_low_and_high(record: dict, cfg: dict) -> Optional[str]:
         return f"VWAP ({vwap}) must be between Low ({low}) and High ({high})"
     return None
 
-
 def _rule_prev_close_positive(record: dict, cfg: dict) -> Optional[str]:
     prev_close = record.get("prev_close")
     if prev_close is None:
@@ -166,7 +152,6 @@ def _rule_prev_close_positive(record: dict, cfg: dict) -> Optional[str]:
         return f"prev_close ({prev_close}) must be > 0"
     return None
 
-
 def _rule_trade_count_positive(record: dict, cfg: dict) -> Optional[str]:
     trade_count = record.get("trade_count")
     if trade_count is None:
@@ -174,7 +159,6 @@ def _rule_trade_count_positive(record: dict, cfg: dict) -> Optional[str]:
     if trade_count <= 0:
         return f"trade_count ({trade_count}) should be > 0 on active trading days"
     return None
-
 
 def _rule_gap_threshold(record: dict, cfg: dict) -> Optional[str]:
     prev_close = record.get("prev_close")
@@ -186,16 +170,14 @@ def _rule_gap_threshold(record: dict, cfg: dict) -> Optional[str]:
     if gap_pct > threshold:
         return (
             f"Gap {gap_pct:.1f}% exceeds threshold {threshold}% "
-            f"(prev_close={prev_close}, open={open_}) — review for earnings/split"
+            f"(prev_close={prev_close}, open={open_})"
         )
     return None
-
 
 def _rule_amended_record_detected(record: dict, cfg: dict) -> Optional[str]:
     if record.get("is_amended", False):
         return f"Record is an amendment (version {record.get('record_version', '?')})"
     return None
-
 
 def _rule_fetch_duration_threshold(record: dict, cfg: dict) -> Optional[str]:
     duration = record.get("fetch_duration_ms")
@@ -203,12 +185,8 @@ def _rule_fetch_duration_threshold(record: dict, cfg: dict) -> Optional[str]:
     if duration is None:
         return None
     if duration > threshold:
-        return (
-            f"API fetch took {duration}ms > threshold {threshold}ms "
-            f"— possible data quality issue"
-        )
+        return f"API fetch took {duration}ms > threshold {threshold}ms"
     return None
-
 
 def _rule_pre_market_volume_non_negative(record: dict, cfg: dict) -> Optional[str]:
     vol = record.get("pre_market_volume")
@@ -218,10 +196,47 @@ def _rule_pre_market_volume_non_negative(record: dict, cfg: dict) -> Optional[st
         return f"pre_market_volume ({vol}) cannot be negative"
     return None
 
+def _rule_corporate_action_consistency(record: dict, cfg: dict) -> Optional[str]:
+    """Corporate action flags must be internally consistent."""
+    split_factor       = record.get("split_factor")
+    dividend_amount    = record.get("dividend_amount", 0.0)
+    is_ex_div          = record.get("is_ex_dividend_date", False)
+    is_ex_split        = record.get("is_ex_split_date", False)
+    has_corp_action    = record.get("has_corporate_action", False)
+
+    issues = []
+
+    # is_ex_split_date=True but split_factor is None
+    if is_ex_split and split_factor is None:
+        issues.append("is_ex_split_date=True but split_factor is None")
+
+    # is_ex_dividend_date=True but dividend_amount=0
+    if is_ex_div and (dividend_amount is None or dividend_amount <= 0):
+        issues.append("is_ex_dividend_date=True but dividend_amount=0")
+
+    # has_corporate_action=True but no action fields set
+    if has_corp_action and split_factor is None and (dividend_amount or 0) <= 0:
+        issues.append("has_corporate_action=True but no split_factor or dividend_amount")
+
+    if issues:
+        return f"Corporate action inconsistency: {'; '.join(issues)}"
+    return None
+
+# Placeholder rules for future stream implementations
+def _rule_bar_within_market_hours(record: dict, cfg: dict) -> Optional[str]:
+    return None  # Phase 3 implementation
+
+def _rule_consistent_bar_spacing(record: dict, cfg: dict) -> Optional[str]:
+    return None  # Phase 3 implementation
+
+def _rule_consecutive_zero_volume(record: dict, cfg: dict) -> Optional[str]:
+    return None  # Phase 5 implementation
+
+def _rule_tick_price_spike(record: dict, cfg: dict) -> Optional[str]:
+    return None  # Phase 5 implementation
+
 
 # ── Rule registry ──────────────────────────────────────────────────────────────
-# Maps rule name (from YAML) to rule function
-# Add new rules here after implementing the function above
 
 _RULE_REGISTRY: Dict[str, Callable] = {
     "high_gte_low":                     _rule_high_gte_low,
@@ -242,6 +257,11 @@ _RULE_REGISTRY: Dict[str, Callable] = {
     "amended_record_detected":          _rule_amended_record_detected,
     "fetch_duration_threshold":         _rule_fetch_duration_threshold,
     "pre_market_volume_non_negative":   _rule_pre_market_volume_non_negative,
+    "corporate_action_consistency":     _rule_corporate_action_consistency,
+    "bar_within_market_hours":          _rule_bar_within_market_hours,
+    "consistent_bar_spacing":           _rule_consistent_bar_spacing,
+    "consecutive_zero_volume":          _rule_consecutive_zero_volume,
+    "tick_price_spike":                 _rule_tick_price_spike,
 }
 
 
@@ -249,19 +269,32 @@ _RULE_REGISTRY: Dict[str, Callable] = {
 
 class RuleEngine:
     """
-    Loads rules from data_quality_rules.yml and applies them to records.
-    Validates at startup that all rule names in YAML have implementations.
+    Loads and applies data quality rules to OHLCV records.
 
-    Usage:
-        engine = RuleEngine(rules_path)
-        results = engine.apply(record_dict)
-        # results is a list of RuleResult — one per rule that fired
+    Supports tiered rule loading:
+      shared rules    — always applied
+      stream rules    — additional rules from stream config
+      disabled rules  — shared rules skipped for this stream
+
+    Supports per-stream threshold overrides:
+      stream config validation.thresholds overrides rule defaults
     """
 
-    def __init__(self, rules_path: Path):
+    def __init__(
+        self,
+        rules_path: Path,
+        stream_name: str = "daily",
+        stream_thresholds: Optional[Dict[str, Any]] = None,
+        additional_rules: Optional[List[dict]] = None,
+        disabled_rules: Optional[List[str]] = None,
+    ):
         """
-        Load and validate rules from YAML file.
-        Raises at startup if any rule in YAML has no implementation.
+        Args:
+            rules_path:        Path to data_quality_rules.yml
+            stream_name:       Which stream (daily/intraday/tick)
+            stream_thresholds: Threshold overrides from streams/*.yml
+            additional_rules:  Extra rules from stream config
+            disabled_rules:    Shared rules to skip for this stream
         """
         if not rules_path.exists():
             raise FileNotFoundError(
@@ -271,20 +304,54 @@ class RuleEngine:
         with open(rules_path) as f:
             raw = yaml.safe_load(f)
 
-        self._rules: List[dict] = raw.get("quality_rules", {}).get("ohlcv", [])
+        quality_rules = raw.get("quality_rules", {})
 
-        # Validate all rules have implementations — fail fast at startup
-        unknown_rules = [
-            r["rule"] for r in self._rules
-            if r["rule"] not in _RULE_REGISTRY
-        ]
-        if unknown_rules:
+        # Load shared rules — always applied
+        shared_rules: List[dict] = quality_rules.get("shared", [])
+
+        # Apply stream threshold overrides to shared rules
+        self._thresholds = stream_thresholds or {}
+        if self._thresholds:
+            shared_rules = self._apply_thresholds(shared_rules)
+
+        # Apply disabled rules filter
+        disabled: Set[str] = set(disabled_rules or [])
+        shared_rules = [r for r in shared_rules if r["rule"] not in disabled]
+
+        # Add stream-specific additional rules
+        extra_rules = additional_rules or []
+        if self._thresholds:
+            extra_rules = self._apply_thresholds(extra_rules)
+
+        self._rules: List[dict] = shared_rules + extra_rules
+
+        # Validate all rules have implementations
+        unknown = [r["rule"] for r in self._rules if r["rule"] not in _RULE_REGISTRY]
+        if unknown:
             raise ValueError(
-                f"Rules defined in YAML but not implemented: {unknown_rules}. "
-                f"Add implementations to rule_engine.py and register in _RULE_REGISTRY."
+                f"Rules in config but not implemented: {unknown}. "
+                f"Add to _RULE_REGISTRY in rule_engine.py."
             )
 
-        logger.info(f"RuleEngine loaded {len(self._rules)} rules from {rules_path.name}")
+        logger.info(
+            f"RuleEngine [{stream_name}]: "
+            f"{len(shared_rules)} shared + {len(extra_rules)} stream-specific rules, "
+            f"{len(disabled)} disabled"
+        )
+
+    def _apply_thresholds(self, rules: List[dict]) -> List[dict]:
+        """Override rule thresholds with stream-specific values."""
+        result = []
+        for rule_cfg in rules:
+            rule_name = rule_cfg["rule"]
+            if rule_name in self._thresholds:
+                # Create a copy with overridden threshold
+                override = rule_cfg.copy()
+                override["threshold"] = self._thresholds[rule_name]
+                result.append(override)
+            else:
+                result.append(rule_cfg)
+        return result
 
     @property
     def rule_count(self) -> int:
@@ -298,13 +365,7 @@ class RuleEngine:
         """
         Apply all rules to a single record.
         Returns list of RuleResult for rules that FIRED (failed).
-        Rules that pass are not included — only failures matter.
-
-        Args:
-            record: Raw dict from provider (before BronzeRecord construction)
-
-        Returns:
-            List of RuleResult — empty list means all rules passed
+        Empty list means all rules passed.
         """
         fired_results = []
 
@@ -313,32 +374,28 @@ class RuleEngine:
             severity  = rule_cfg.get("severity", RuleSeverity.WARNING.value)
             action    = rule_cfg.get("action", RuleAction.FLAG_RECORD.value)
 
-            # Skip alert-only rules — handled at batch level
             if action == RuleAction.ALERT.value:
-                continue
+                continue  # batch-level — skip per-record
 
             rule_fn = _RULE_REGISTRY[rule_name]
 
             try:
                 error_msg = rule_fn(record, rule_cfg)
             except Exception as e:
-                # Rule function itself crashed — log and treat as warning
                 logger.error(
                     f"Rule '{rule_name}' raised exception: {e}. "
-                    f"Record: symbol={record.get('symbol')}, "
-                    f"date={record.get('date')}"
+                    f"symbol={record.get('symbol')}, date={record.get('date')}"
                 )
                 error_msg = f"Rule evaluation error: {e}"
                 severity  = RuleSeverity.WARNING.value
                 action    = RuleAction.FLAG_RECORD.value
 
             if error_msg is not None:
-                # Rule fired — determine outcome from severity
-                if severity == RuleSeverity.CRITICAL.value:
-                    outcome = ValidationOutcome.REJECTED.value
-                else:
-                    outcome = ValidationOutcome.FLAGGED.value
-
+                outcome = (
+                    ValidationOutcome.REJECTED.value
+                    if severity == RuleSeverity.CRITICAL.value
+                    else ValidationOutcome.FLAGGED.value
+                )
                 fired_results.append(RuleResult(
                     rule_name=rule_name,
                     outcome=outcome,

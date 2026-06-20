@@ -5,42 +5,51 @@ Loads and merges all config files into a single dot-accessible config object.
 Adding new config keys requires only editing the YAML — no code changes needed.
 
 Load order (later overrides earlier):
-  1. config/{environment}.yml  — infrastructure config
-  2. config/risk.yml           — risk parameters  
-  3. config/logging.yml        — logging settings
-  4. .env                      — secrets (never committed to Git)
-  5. Environment variables     — runtime overrides (highest priority)
+  1. config/{environment}.yml       — infrastructure (S3, Databricks, cluster)
+  2. config/sources.yml             — data provider settings (shared)
+  3. config/streams/daily.yml       — daily stream config + validation thresholds
+  4. config/streams/intraday.yml    — intraday stream config (Phase 3)
+  5. config/streams/tick.yml        — tick stream config (Phase 5)
+  6. config/risk.yml                — risk parameters
+  7. config/logging.yml             — logging settings
+  8. .env                           — secrets (never committed)
+  9. Environment variables          — runtime overrides (highest priority)
 
 Usage:
     from src.config.config_loader import ConfigLoader
-    
+
     config = ConfigLoader.load()
-    
+
+    # Infrastructure
     bucket  = config.aws.s3.raw
-    risk    = config.risk.max_position_risk_pct
     catalog = config.databricks.catalog
-    
+
+    # Sources
+    source  = config.sources.primary          # "ibkr"
+    fallback = config.sources.fallback        # "yahoo"
+
+    # Streams
+    if config.daily.enabled:
+        table = config.daily.table
+        threshold = config.daily.validation.thresholds.price_change_pct_threshold
+
+    # Risk
+    max_risk = config.risk.max_position_risk_pct
+
     # Safe access with default
-    value = config.get("some.key", default="fallback")
-    
-    # Check if key exists
-    if config.has("feature_flags.new_feature"):
-        ...
-    
-    # Convert back to plain dict
-    d = config.to_dict()
+    value = config.get("daily.validation.thresholds.gap_threshold", default=15.0)
 """
 
 import os
 import logging
 import yaml
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Set
 from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
-_SENTINEL = object()  # unique object to distinguish "not found" from None
+_SENTINEL = object()
 
 
 # ── Dot-accessible config node ─────────────────────────────────────────────────
@@ -49,10 +58,6 @@ class ConfigNode:
     """
     Wraps a dict and provides recursive dot-notation access.
     Any nested dict becomes a ConfigNode automatically.
-
-    Example:
-        node = ConfigNode({"aws": {"s3": {"raw": "my-bucket"}}})
-        node.aws.s3.raw  # → "my-bucket"
     """
 
     def __init__(self, data: dict, _path: str = ""):
@@ -83,28 +88,13 @@ class ConfigNode:
         return f"ConfigNode(path='{path}', keys={list(data.keys())})"
 
     def get(self, dot_path: str, default: Any = None) -> Any:
-        """
-        Safe access using dot-separated path string.
-        Returns default if key does not exist.
-
-        Example:
-            config.get("aws.s3.raw", default="fallback-bucket")
-        """
         result = self._traverse(dot_path)
         return default if result is _SENTINEL else result
 
     def has(self, dot_path: str) -> bool:
-        """
-        Check if a dot-separated config path exists.
-        Uses sentinel to correctly handle keys whose value is None or False.
-        """
         return self._traverse(dot_path) is not _SENTINEL
 
     def _traverse(self, dot_path: str) -> Any:
-        """
-        Traverse the config tree using a dot-separated path.
-        Returns _SENTINEL if any key in the path is missing.
-        """
         try:
             node = self
             for key in dot_path.split("."):
@@ -114,7 +104,6 @@ class ConfigNode:
             return _SENTINEL
 
     def to_dict(self) -> dict:
-        """Convert back to plain dict."""
         data = object.__getattribute__(self, "_data")
         result = {}
         for key, value in data.items():
@@ -125,17 +114,12 @@ class ConfigNode:
         return result
 
     def keys(self):
-        """Return top-level keys at this node."""
         return object.__getattribute__(self, "_data").keys()
 
 
 # ── Deep merge utility ─────────────────────────────────────────────────────────
 
 def _deep_merge(base: dict, override: dict) -> dict:
-    """
-    Recursively merge override into base.
-    Override values take precedence. Lists are replaced entirely.
-    """
     result = base.copy()
     for key, value in override.items():
         if key in result and isinstance(result[key], dict) and isinstance(value, dict):
@@ -154,8 +138,7 @@ def _find_repo_root() -> Path:
         if (parent / "databricks.yml").exists():
             return parent
     raise FileNotFoundError(
-        "Cannot locate repo root — databricks.yml not found. "
-        "Ensure you are running from within the tradeanalytics repo."
+        "Cannot locate repo root — databricks.yml not found."
     )
 
 
@@ -166,10 +149,11 @@ class ConfigLoader:
     Singleton config loader. Reads all YAML config files and merges them
     into a single dot-accessible ConfigNode.
 
-    To add new config files in future phases:
-      1. Create the YAML file in config/
-      2. Add one line to the config_files list below
-      3. Access immediately via config.your.new.key
+    Config file load order:
+      Infrastructure → Sources → Streams → Risk → Logging → Secrets → Env vars
+
+    Streams are auto-discovered from config/streams/*.yml
+    Each stream file merges under its own top-level key (daily, intraday, tick)
     """
 
     _instance: Optional[ConfigNode] = None
@@ -182,17 +166,6 @@ class ConfigLoader:
         force_reload: bool = False,
         repo_root: Path = None,
     ) -> ConfigNode:
-        """
-        Load and return the merged config. Cached after first call.
-
-        Args:
-            environment:  'dev' | 'prod' (default: ENVIRONMENT env var or 'dev')
-            force_reload: Re-read all files even if already loaded
-            repo_root:    Override repo root path (useful for testing)
-
-        Returns:
-            ConfigNode: Dot-accessible merged config object
-        """
         env = environment or os.getenv("ENVIRONMENT", "dev")
 
         if cls._instance is not None and not force_reload and cls._env == env:
@@ -206,17 +179,25 @@ class ConfigLoader:
             load_dotenv(env_file, override=False)
             logger.debug(f"Loaded secrets from {env_file}")
 
-        # ── Add new config files here as the project grows ──────────────────
+        # ── Config file load order ─────────────────────────────────────────
         config_files = [
             ("infrastructure", root / "config" / f"{env}.yml"),
-            ("data",           root / "config" / "data.yml"),
+            ("sources",        root / "config" / "sources.yml"),
             ("risk",           root / "config" / "risk.yml"),
             ("logging",        root / "config" / "logging.yml"),
             # Phase 3: ("indicators",    root / "config" / "indicators.yml"),
-            # Phase 3: ("backtest",      root / "config" / "backtest.yml"),
             # Phase 4: ("notifications", root / "config" / "notifications.yml"),
         ]
-        # ────────────────────────────────────────────────────────────────────
+
+        # Auto-discover stream configs from config/streams/*.yml
+        streams_dir = root / "config" / "streams"
+        if streams_dir.exists():
+            for stream_file in sorted(streams_dir.glob("*.yml")):
+                stream_name = stream_file.stem
+                config_files.append((f"stream_{stream_name}", stream_file))
+                logger.debug(f"Discovered stream config: {stream_file.name}")
+
+        # ──────────────────────────────────────────────────────────────────
 
         merged = {}
         for label, path in config_files:
@@ -236,11 +217,13 @@ class ConfigLoader:
         cls._instance = config
         cls._env = env
 
-        logger.info(
-            f"Config loaded: environment={env}, "
-            f"source={config.data.source}, "
-            f"catalog={config.databricks.catalog}"
-        )
+        # Log which streams are active
+        for stream in ["daily", "intraday", "tick"]:
+            if stream in merged:
+                enabled = merged[stream].get("enabled", False)
+                phase   = merged[stream].get("phase", "?")
+                status  = "ACTIVE" if enabled else f"disabled (Phase {phase})"
+                logger.info(f"Stream '{stream}': {status}")
 
         return config
 
@@ -248,28 +231,28 @@ class ConfigLoader:
     def _inject_env_secrets(cls, config: dict) -> dict:
         """
         Inject environment variables into config dict.
-
-        To add new secrets:
-          1. Add to .env.example with a comment
-          2. Add the mapping below
-          3. Access via config.section.key in code
+        To add new secrets: add mapping here + entry in .env.example
         """
         env_mappings = {
-            "IBKR_ACCOUNT_ID": ("ibkr", "account_id"),
-            "IBKR_USERNAME":   ("ibkr", "username"),
-            "IBKR_PASSWORD":   ("ibkr", "password"),
+            # IBKR credentials
+            "IBKR_ACCOUNT_ID":  ("sources", "ibkr", "account_id"),
+            "IBKR_USERNAME":    ("sources", "ibkr", "username"),
+            "IBKR_PASSWORD":    ("sources", "ibkr", "password"),
+            # Polygon (future)
+            "POLYGON_API_KEY":  ("sources", "polygon", "api_key"),
         }
 
-        for env_var, (section, key) in env_mappings.items():
+        for env_var, path in env_mappings.items():
             value = os.getenv(env_var)
             if value:
-                if section not in config:
-                    config[section] = {}
-                config[section][key] = value
-                logger.debug(f"Injected: {env_var} → config.{section}.{key}")
-            else:
-                if section in config and key not in config[section]:
-                    config[section][key] = ""
+                # Navigate to correct nested dict
+                target = config
+                for key in path[:-1]:
+                    if key not in target:
+                        target[key] = {}
+                    target = target[key]
+                target[path[-1]] = value
+                logger.debug(f"Injected: {env_var} → config.{'.'.join(path)}")
 
         return config
 

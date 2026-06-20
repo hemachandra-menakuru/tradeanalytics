@@ -1,0 +1,85 @@
+# TradeAnalytics — Intraday Stream Configuration
+# Stream: 1h, 4h OHLCV data
+# Phase: 3 (DISABLED — enable in Phase 3 implementation)
+# Table: handh_trade.bronze.market_data_intraday
+
+intraday:
+  enabled: false
+  phase: 3
+  description: "Intraday OHLCV — 1h/4h bars for entry timing"
+
+  table: market_data_intraday
+  rejected_table: market_data_rejected
+  watermark_table: ingestion_watermark_intraday
+
+  intervals: ["1h", "4h"]
+
+  schedule:
+    cron: "30 16 * * 1-5"        # 4:30 PM Mon-Fri (after market close)
+    timezone: "America/New_York"
+
+  history:
+    lookback_years: 2
+    retention_years: 2
+    amendment_buffer_days: 1
+
+  ingestion:
+    batch_size_days: 7            # smaller batches — more data per day
+    max_gap_days: 14              # tighter threshold for intraday
+
+    history_extension:
+      enabled: false
+      extend_history_start: null
+      symbols: []
+
+    date_range_override:
+      enabled: false
+      start_date: null
+      end_date: null
+      symbols: []
+
+    restatement:
+      enabled: false
+      start_date: null
+      end_date: null
+      symbols: []
+
+    force_reload:
+      enabled: false
+      symbols: []
+      confirm: false
+
+  validation:
+    thresholds:
+      price_change_pct_threshold:   5.0    # intraday: 5% per bar is extreme
+      gap_threshold:                2.0    # intraday: 2% between bars is suspicious
+      fetch_duration_ms:            15000  # tighter timeout for intraday
+      max_consecutive_missing_days: 3      # intraday gaps are more critical
+
+    provider_nullable_fields:
+      yahoo:
+        - vwap
+        - trade_count
+        - pre_market_high
+        - pre_market_low
+        - pre_market_close
+        - pre_market_volume
+        - post_market_high
+        - post_market_low
+        - post_market_close
+        - post_market_volume
+        - adj_factor
+        - exchange
+      ibkr: []
+      polygon: []
+
+    additional_rules:
+      - rule: bar_within_market_hours   # Phase 3 implementation
+        severity: warning
+        action: flag_record
+      - rule: consistent_bar_spacing    # Phase 3 implementation
+        severity: warning
+        action: flag_record
+
+    disabled_rules:
+      - no_weekend_dates                # intraday uses bar_time_utc not date

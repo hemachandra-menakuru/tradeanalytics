@@ -154,7 +154,7 @@ def test_factory_returns_ibkr_for_ibkr_config(config):
 
 def test_factory_returns_yahoo_for_fallback(config):
     provider = MarketDataFactory.get_fallback_provider(config)
-    assert provider.provider_name == "yahoo"
+    assert provider.provider_name == "yahoo"  # config.sources.fallback = yahoo
 
 
 def test_factory_get_by_name_yahoo(config):

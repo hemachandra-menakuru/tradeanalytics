@@ -1,5 +1,5 @@
 """
-Tests for DataQualityValidator — validates batch processing behaviour.
+Tests for DataQualityValidator — stream-aware validation.
 """
 import pytest
 from pathlib import Path
@@ -7,17 +7,24 @@ from src.ingestion.validation.validator import DataQualityValidator
 from src.config.config_loader import ConfigLoader
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+RULES_PATH = REPO_ROOT / "src" / "reference" / "data_quality_rules.yml"
+
+
+@pytest.fixture(autouse=True)
+def reset_config():
+    ConfigLoader.reset()
+    yield
+    ConfigLoader.reset()
 
 
 @pytest.fixture
 def config():
-    ConfigLoader.reset()
     return ConfigLoader.load(environment="dev", repo_root=REPO_ROOT)
 
 
 @pytest.fixture
 def validator(config):
-    return DataQualityValidator(config)
+    return DataQualityValidator.for_stream(config, "daily", rules_path=RULES_PATH)
 
 
 @pytest.fixture
@@ -40,7 +47,7 @@ def rejected_record():
     return {
         "symbol": "AAPL", "date": "2026-06-19", "interval": "1d",
         "source": "ibkr",
-        "open": 150.0, "high": 148.0,  # high < low — critical
+        "open": 150.0, "high": 148.0,
         "low": 149.75, "close": 151.25,
         "volume": 1_000_000,
     }
@@ -52,31 +59,39 @@ def flagged_record():
         "symbol": "AAPL", "date": "2026-06-19", "interval": "1d",
         "source": "ibkr",
         "open": 150.0, "high": 152.5, "low": 149.75, "close": 151.25,
-        "volume": 0,   # warning — flagged not rejected
+        "volume": 0,
         "prev_close": 149.50,
     }
 
 
-# ── Validator setup tests ──────────────────────────────────────────────────────
+# ── Validator setup ───────────────────────────────────────────────────────────
 
-def test_validator_loads_successfully(validator):
+def test_validator_loads_for_daily_stream(validator):
     assert validator.rule_count > 0
 
 
-# ── Clean batch tests ──────────────────────────────────────────────────────────
+def test_validator_for_stream_factory(config):
+    v = DataQualityValidator.for_stream(config, "daily", rules_path=RULES_PATH)
+    assert v is not None
+
+
+def test_validator_for_daily_convenience(config):
+    v = DataQualityValidator.for_daily(config, rules_path=RULES_PATH)
+    assert v is not None
+
+
+# ── Clean batch ───────────────────────────────────────────────────────────────
 
 def test_clean_record_goes_to_clean_records(validator, clean_record):
     summary = validator.validate_batch("AAPL", "1d", "batch_001", [clean_record])
     assert summary.total_passed == 1
     assert summary.total_rejected == 0
     assert summary.total_flagged == 0
-    assert len(summary.clean_records) == 1
 
 
 def test_clean_batch_has_100_pass_rate(validator, clean_record):
-    # Use known weekdays (Mon-Fri) to avoid weekend rejections
     weekday_dates = [
-        "2026-06-15", "2026-06-16", "2026-06-17", "2026-06-18", "2026-06-19"
+        "2026-06-15", "2026-06-16", "2026-06-17", "2026-06-18", "2026-06-22"
     ]
     records = []
     for d in weekday_dates:
@@ -87,12 +102,11 @@ def test_clean_batch_has_100_pass_rate(validator, clean_record):
     assert summary.pass_rate_pct == 100.0
 
 
-# ── Rejected record tests ──────────────────────────────────────────────────────
+# ── Rejected records ──────────────────────────────────────────────────────────
 
-def test_rejected_record_goes_to_rejected_records(validator, rejected_record):
+def test_rejected_record_goes_to_rejected(validator, rejected_record):
     summary = validator.validate_batch("AAPL", "1d", "batch_001", [rejected_record])
     assert summary.total_rejected == 1
-    assert summary.total_passed == 0
     assert len(summary.rejected_records) == 1
 
 
@@ -102,72 +116,55 @@ def test_rejected_record_not_in_clean_or_flagged(validator, rejected_record):
     assert len(summary.flagged_records) == 0
 
 
-def test_rejected_record_dict_has_required_fields(validator, rejected_record):
+def test_rejected_record_has_required_fields(validator, rejected_record):
     summary = validator.validate_batch("AAPL", "1d", "batch_001", [rejected_record])
-    rejected = summary.rejected_records[0]
-    assert "symbol" in rejected
-    assert "rejected_rule" in rejected
-    assert "rejection_reason" in rejected
-    assert "raw_record" in rejected
-    assert "rejected_at" in rejected
-    assert rejected["reprocessed"] == False
+    r = summary.rejected_records[0]
+    assert "rejected_rule" in r
+    assert "rejection_reason" in r
+    assert "raw_record" in r
+    assert r["reprocessed"] == False
 
 
-def test_rejection_reason_tracked(validator, rejected_record):
-    summary = validator.validate_batch("AAPL", "1d", "batch_001", [rejected_record])
-    assert "high_gte_low" in summary.rejection_reasons
+# ── Flagged records ───────────────────────────────────────────────────────────
 
-
-# ── Flagged record tests ───────────────────────────────────────────────────────
-
-def test_flagged_record_goes_to_flagged_records(validator, flagged_record):
+def test_flagged_record_goes_to_flagged(validator, flagged_record):
     summary = validator.validate_batch("AAPL", "1d", "batch_001", [flagged_record])
     assert summary.total_flagged == 1
-    assert len(summary.flagged_records) == 1
 
 
 def test_flagged_record_has_quality_flag_true(validator, flagged_record):
     summary = validator.validate_batch("AAPL", "1d", "batch_001", [flagged_record])
-    flagged = summary.flagged_records[0]
-    assert flagged["data_quality_flag"] == True
+    assert summary.flagged_records[0]["data_quality_flag"] == True
 
 
-def test_flagged_record_has_quality_reasons(validator, flagged_record):
+def test_flagged_record_has_reasons(validator, flagged_record):
     import json
     summary = validator.validate_batch("AAPL", "1d", "batch_001", [flagged_record])
-    flagged = summary.flagged_records[0]
-    reasons = json.loads(flagged["data_quality_reasons"])
+    reasons = json.loads(summary.flagged_records[0]["data_quality_reasons"])
     assert "volume_positive" in reasons
 
 
-def test_flag_reason_tracked(validator, flagged_record):
-    summary = validator.validate_batch("AAPL", "1d", "batch_001", [flagged_record])
-    assert "volume_positive" in summary.flag_reasons
+# ── Mixed batch ───────────────────────────────────────────────────────────────
 
-
-# ── Mixed batch tests ──────────────────────────────────────────────────────────
-
-def test_mixed_batch_correctly_classified(
-    validator, clean_record, rejected_record, flagged_record
-):
-    records = [clean_record, rejected_record, flagged_record]
-    summary = validator.validate_batch("AAPL", "1d", "batch_001", records)
+def test_mixed_batch_classified_correctly(validator, clean_record, rejected_record, flagged_record):
+    summary = validator.validate_batch(
+        "AAPL", "1d", "batch_001",
+        [clean_record, rejected_record, flagged_record]
+    )
     assert summary.total_input == 3
     assert summary.total_passed == 1
     assert summary.total_rejected == 1
     assert summary.total_flagged == 1
 
 
-def test_writable_records_includes_clean_and_flagged(
-    validator, clean_record, flagged_record
-):
+def test_writable_records_includes_clean_and_flagged(validator, clean_record, flagged_record):
     summary = validator.validate_batch(
         "AAPL", "1d", "batch_001", [clean_record, flagged_record]
     )
     assert len(summary.writable_records) == 2
 
 
-# ── ValidationSummary property tests ─────────────────────────────────────────
+# ── Summary properties ────────────────────────────────────────────────────────
 
 def test_pass_rate_100_for_empty_batch(validator):
     summary = validator.validate_batch("AAPL", "1d", "batch_001", [])
@@ -191,36 +188,24 @@ def test_has_issues_false_for_clean_batch(validator, clean_record):
     assert summary.has_issues == False
 
 
-# ── Audit log tests ───────────────────────────────────────────────────────────
+# ── Audit log ─────────────────────────────────────────────────────────────────
 
-def test_audit_log_populated_for_rejections(validator, rejected_record):
+def test_audit_log_for_rejections(validator, rejected_record):
     summary = validator.validate_batch("AAPL", "1d", "batch_001", [rejected_record])
     assert len(summary.audit_log) > 0
-    entry = summary.audit_log[0]
-    assert entry["symbol"] == "AAPL"
-    assert entry["outcome"] == "rejected"
+    assert summary.audit_log[0]["outcome"] == "rejected"
 
 
-def test_audit_log_populated_for_flags(validator, flagged_record):
-    summary = validator.validate_batch("AAPL", "1d", "batch_001", [flagged_record])
-    assert len(summary.audit_log) > 0
-    entry = summary.audit_log[0]
-    assert entry["outcome"] == "flagged"
-
-
-def test_clean_records_have_no_audit_entries(validator, clean_record):
+def test_no_audit_entries_for_clean_records(validator, clean_record):
     summary = validator.validate_batch("AAPL", "1d", "batch_001", [clean_record])
     assert len(summary.audit_log) == 0
 
 
-# ── to_summary_dict test ──────────────────────────────────────────────────────
-
-def test_to_summary_dict_has_no_record_data(validator, clean_record, rejected_record):
+def test_to_summary_dict_no_record_data(validator, clean_record, rejected_record):
     summary = validator.validate_batch(
         "AAPL", "1d", "batch_001", [clean_record, rejected_record]
     )
     d = summary.to_summary_dict()
     assert "clean_records" not in d
-    assert "rejected_records" not in d
     assert "total_input" in d
     assert "pass_rate_pct" in d

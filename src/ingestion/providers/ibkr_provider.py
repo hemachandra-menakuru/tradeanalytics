@@ -56,11 +56,11 @@ class IBKRProvider(MarketDataProvider):
 
     def __init__(self, config: ConfigNode):
         super().__init__(config)
-        self._base_url    = config.ibkr.base_url
-        self._verify_ssl  = config.ibkr.verify_ssl
-        self._timeout     = config.ibkr.timeout_seconds
-        self._max_retries = config.ibkr.max_retries
-        self._account_id  = config.ibkr.account_id
+        self._base_url    = config.sources.ibkr.base_url
+        self._verify_ssl  = config.sources.ibkr.verify_ssl
+        self._timeout     = config.sources.ibkr.timeout_seconds
+        self._max_retries = config.sources.ibkr.max_retries
+        self._account_id  = config.sources.ibkr.account_id
         self._session     = None  # requests.Session — initialised on first use
 
         logger.info(

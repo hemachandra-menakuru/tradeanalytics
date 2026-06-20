@@ -2,21 +2,19 @@
 TradeAnalytics Data Quality Validator
 ======================================
 Orchestrates validation of a batch of raw OHLCV records.
-Uses RuleEngine to apply per-record rules and produces a ValidationSummary.
+Uses RuleEngine with stream-specific configuration.
 
 Usage:
     from src.ingestion.validation.validator import DataQualityValidator
     from src.config.config_loader import ConfigLoader
 
     config = ConfigLoader.load()
-    validator = DataQualityValidator(config)
+
+    # Stream-aware validator
+    validator = DataQualityValidator.for_stream(config, stream_name="daily")
 
     raw_records = provider.get_historical("AAPL", start, end)
     summary = validator.validate_batch("AAPL", "1d", "batch_001", raw_records)
-
-    # Write results
-    spark.createDataFrame(summary.writable_records)...   # to main Bronze table
-    spark.createDataFrame(summary.rejected_records)...   # to rejected table
 """
 
 from __future__ import annotations
@@ -38,33 +36,95 @@ logger = logging.getLogger(__name__)
 
 class DataQualityValidator:
     """
-    Validates batches of raw OHLCV records against data quality rules.
-
-    Responsibilities:
-      - Apply per-record rules via RuleEngine
-      - Classify each record as clean / flagged / rejected
-      - Enrich accepted records with data_quality fields
-      - Build RejectedRecord dicts for quarantine table
-      - Produce ValidationSummary for logging and monitoring
-      - Check batch-level continuity (missing days)
+    Validates batches of raw OHLCV records against stream-specific rules.
+    Use DataQualityValidator.for_stream() to create a stream-aware instance.
     """
 
-    def __init__(self, config: ConfigNode, rules_path: Optional[Path] = None):
+    def __init__(self, engine: RuleEngine, stream_name: str = "daily"):
+        self._engine      = engine
+        self._stream_name = stream_name
+
+    @classmethod
+    def for_stream(
+        cls,
+        config: ConfigNode,
+        stream_name: str = "daily",
+        rules_path: Optional[Path] = None,
+    ) -> "DataQualityValidator":
         """
+        Create a validator configured for a specific stream.
+        Reads thresholds and rule overrides from streams/{stream_name}.yml
+
         Args:
-            config:     Loaded ConfigNode (from ConfigLoader.load())
-            rules_path: Override path to data_quality_rules.yml (for testing)
+            config:      Loaded ConfigNode
+            stream_name: "daily" | "intraday" | "tick"
+            rules_path:  Override rules file path (for testing)
         """
         if rules_path is None:
-            repo_root = _find_repo_root()
+            repo_root  = _find_repo_root()
             rules_path = repo_root / "src" / "reference" / "data_quality_rules.yml"
 
-        self._engine = RuleEngine(rules_path)
-        self._config = config
-        logger.info(
-            f"DataQualityValidator ready — "
-            f"{self._engine.rule_count} rules loaded"
+        # Get stream config
+        stream_cfg = getattr(config, stream_name, None)
+        if stream_cfg is None:
+            raise ValueError(
+                f"Stream '{stream_name}' not found in config. "
+                f"Available: check config/streams/*.yml"
+            )
+
+        # Extract validation settings from stream config
+        validation_cfg = stream_cfg.get(f"{stream_name}.validation")
+
+        thresholds       = {}
+        additional_rules = []
+        disabled_rules   = []
+
+        if validation_cfg is not None:
+            # Extract thresholds
+            thresholds_cfg = stream_cfg.get(
+                f"{stream_name}.validation.thresholds"
+            )
+            if thresholds_cfg is not None:
+                thresholds = thresholds_cfg.to_dict() if hasattr(
+                    thresholds_cfg, "to_dict"
+                ) else dict(thresholds_cfg)
+
+            # Extract additional rules
+            additional_rules_raw = config.get(
+                f"{stream_name}.validation.additional_rules",
+                default=[]
+            )
+            if additional_rules_raw:
+                additional_rules = list(additional_rules_raw)
+
+            # Extract disabled rules
+            disabled_rules_raw = config.get(
+                f"{stream_name}.validation.disabled_rules",
+                default=[]
+            )
+            if disabled_rules_raw:
+                disabled_rules = list(disabled_rules_raw)
+
+        engine = RuleEngine(
+            rules_path=rules_path,
+            stream_name=stream_name,
+            stream_thresholds=thresholds,
+            additional_rules=additional_rules,
+            disabled_rules=disabled_rules,
         )
+
+        logger.info(
+            f"DataQualityValidator created for stream='{stream_name}' — "
+            f"{engine.rule_count} rules, "
+            f"{len(thresholds)} threshold overrides"
+        )
+
+        return cls(engine=engine, stream_name=stream_name)
+
+    @classmethod
+    def for_daily(cls, config: ConfigNode, rules_path: Optional[Path] = None):
+        """Convenience constructor for daily stream."""
+        return cls.for_stream(config, "daily", rules_path)
 
     @property
     def rule_count(self) -> int:
@@ -80,17 +140,6 @@ class DataQualityValidator:
     ) -> ValidationSummary:
         """
         Validate a batch of raw OHLCV records for one symbol + interval.
-
-        Args:
-            symbol:           Ticker symbol e.g. "AAPL"
-            interval:         Data interval e.g. "1d"
-            batch_id:         Unique identifier for this ingestion run
-            raw_records:      List of raw dicts from provider
-            pipeline_version: Git SHA of current code (for audit trail)
-
-        Returns:
-            ValidationSummary with clean/flagged/rejected record lists
-            and full audit log
         """
         summary = ValidationSummary(
             symbol=symbol,
@@ -109,11 +158,10 @@ class DataQualityValidator:
                 summary=summary,
             )
 
-        # Batch-level checks
         self._check_continuity(raw_records, symbol, interval, summary)
 
         logger.info(
-            f"Validated {symbol}/{interval}: "
+            f"[{self._stream_name}] Validated {symbol}/{interval}: "
             f"{summary.total_passed} passed, "
             f"{summary.total_flagged} flagged, "
             f"{summary.total_rejected} rejected "
@@ -131,90 +179,54 @@ class DataQualityValidator:
         pipeline_version: str,
         summary: ValidationSummary,
     ) -> None:
-        """Apply all rules to a single record and update summary."""
-
         fired_results = self._engine.apply(record)
-
         rejections = [r for r in fired_results
                       if r.outcome == ValidationOutcome.REJECTED.value]
         flags      = [r for r in fired_results
                       if r.outcome == ValidationOutcome.FLAGGED.value]
-
         record_date = str(record.get("date", "unknown"))
 
         if rejections:
-            primary_rejection = rejections[0]
-            rejected_dict = self._build_rejected_record(
+            primary = rejections[0]
+            summary.rejected_records.append(self._build_rejected_record(
                 record=record,
-                rule_name=primary_rejection.rule_name,
-                reason=primary_rejection.message or primary_rejection.rule_name,
+                rule_name=primary.rule_name,
+                reason=primary.message or primary.rule_name,
                 batch_id=batch_id,
                 pipeline_version=pipeline_version,
-            )
-            summary.rejected_records.append(rejected_dict)
+            ))
             summary.total_rejected += 1
-
             for r in rejections:
                 summary.rejection_reasons[r.rule_name] = (
                     summary.rejection_reasons.get(r.rule_name, 0) + 1
                 )
-                summary.add_audit_entry(
-                    record_date=record_date,
-                    outcome=ValidationOutcome.REJECTED.value,
-                    rule_name=r.rule_name,
-                    message=r.message or "",
-                )
+                summary.add_audit_entry(record_date,
+                    ValidationOutcome.REJECTED.value, r.rule_name, r.message or "")
 
         elif flags:
-            enriched = self._enrich_record(
-                record=record,
-                flag_reasons=[f.rule_name for f in flags],
-                data_quality_flag=True,
-            )
+            enriched = self._enrich_record(record, [f.rule_name for f in flags], True)
             summary.flagged_records.append(enriched)
             summary.total_flagged += 1
-
             for f in flags:
                 summary.flag_reasons[f.rule_name] = (
                     summary.flag_reasons.get(f.rule_name, 0) + 1
                 )
-                summary.add_audit_entry(
-                    record_date=record_date,
-                    outcome=ValidationOutcome.FLAGGED.value,
-                    rule_name=f.rule_name,
-                    message=f.message or "",
-                )
+                summary.add_audit_entry(record_date,
+                    ValidationOutcome.FLAGGED.value, f.rule_name, f.message or "")
 
         else:
-            enriched = self._enrich_record(
-                record=record,
-                flag_reasons=[],
-                data_quality_flag=False,
+            summary.clean_records.append(
+                self._enrich_record(record, [], False)
             )
-            summary.clean_records.append(enriched)
             summary.total_passed += 1
 
-    def _enrich_record(
-        self,
-        record: dict,
-        flag_reasons: List[str],
-        data_quality_flag: bool,
-    ) -> dict:
-        """Add data quality fields to an accepted record."""
+    def _enrich_record(self, record, flag_reasons, flag):
         enriched = record.copy()
-        enriched["data_quality_flag"]    = data_quality_flag
+        enriched["data_quality_flag"]    = flag
         enriched["data_quality_reasons"] = json.dumps(flag_reasons)
         return enriched
 
-    def _build_rejected_record(
-        self,
-        record: dict,
-        rule_name: str,
-        reason: str,
-        batch_id: str,
-        pipeline_version: str,
-    ) -> dict:
-        """Build a dict for the bronze.market_data_rejected table."""
+    def _build_rejected_record(self, record, rule_name, reason, batch_id, pipeline_version):
         return {
             "symbol":           record.get("symbol", "unknown"),
             "date":             str(record.get("date", "unknown")),
@@ -236,39 +248,26 @@ class DataQualityValidator:
             "pipeline_version": pipeline_version,
         }
 
-    def _check_continuity(
-        self,
-        records: List[dict],
-        symbol: str,
-        interval: str,
-        summary: ValidationSummary,
-    ) -> None:
-        """Check for consecutive missing trading days (daily only)."""
+    def _check_continuity(self, records, symbol, interval, summary):
         if interval != "1d" or len(records) < 2:
             return
-
         from datetime import date
-
         accepted_dates = []
         for r in records:
             date_val = r.get("date")
             if date_val is None:
                 continue
             try:
-                if isinstance(date_val, str):
-                    accepted_dates.append(date.fromisoformat(date_val))
-                else:
-                    accepted_dates.append(date_val)
+                accepted_dates.append(
+                    date.fromisoformat(date_val)
+                    if isinstance(date_val, str) else date_val
+                )
             except ValueError:
                 continue
-
         if len(accepted_dates) < 2:
             return
-
         accepted_dates.sort()
-        max_gap = 0
-        gap_start = None
-
+        max_gap, gap_start = 0, None
         for i in range(1, len(accepted_dates)):
             delta = (accepted_dates[i] - accepted_dates[i-1]).days
             if delta > 3:
@@ -276,17 +275,11 @@ class DataQualityValidator:
                 if trading_days_gap > max_gap:
                     max_gap = trading_days_gap
                     gap_start = accepted_dates[i-1]
-
-        threshold = 5
-        if max_gap > threshold:
+        if max_gap > 5:
             msg = (
                 f"{symbol}/{interval}: {max_gap} consecutive trading days "
-                f"missing after {gap_start} — possible ingestion gap"
+                f"missing after {gap_start}"
             )
             logger.warning(msg)
-            summary.add_audit_entry(
-                record_date=str(gap_start),
-                outcome="alert",
-                rule_name="max_consecutive_missing_days",
-                message=msg,
-            )
+            summary.add_audit_entry(str(gap_start), "alert",
+                "max_consecutive_missing_days", msg)
