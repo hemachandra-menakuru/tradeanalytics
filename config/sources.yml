@@ -7,7 +7,7 @@ sources:
   fallback: yahoo
 
   ibkr:
-    base_url: https://localhost:5000/v1/api
+    base_url: https://localhost:5055/v1/api
     verify_ssl: false
     timeout_seconds: 30
     max_retries: 3
