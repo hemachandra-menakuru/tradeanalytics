@@ -78,3 +78,19 @@ tradeanalytics/
 
 ## Reference
 See `docs/TradeAnalytics_Phase1_Infrastructure_v2.docx` for full AWS resource IDs, debug notes and setup history.
+
+## IBKR Client Portal Gateway
+
+Gateway location: `~/dev/tools/ibkr/clientportal.gw/`
+
+Start command:
+```bash
+cd ~/dev/tools/ibkr/clientportal.gw && bin/run.sh root/conf.yaml
+```
+
+Then authenticate at: https://localhost:5001
+
+Connection test:
+```bash
+python scripts/test_ibkr_connection.py
+```
