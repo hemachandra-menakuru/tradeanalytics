@@ -1,0 +1,164 @@
+# TradeAnalytics — Data Quality Rules
+# =====================================
+# Rule DEFINITIONS only — no thresholds hardcoded here.
+# Thresholds are stream-specific and live in config/streams/*.yml
+# under validation.thresholds section.
+#
+# Rule lifecycle:
+#   shared:   apply to ALL streams always
+#   daily:    additional rules for daily stream only
+#   intraday: additional rules for intraday stream (Phase 3)
+#   tick:     additional rules for tick stream (Phase 5)
+#
+# Adding a new rule:
+#   1. Add definition here under appropriate section
+#   2. Implement _rule_{name} function in src/ingestion/validation/rule_engine.py
+#   3. Register in _RULE_REGISTRY
+#   4. Add threshold override in relevant streams/*.yml if needed
+#   5. Add test in tests/ingestion/validation/test_rule_engine.py
+
+quality_rules:
+
+  # ── Shared rules — applied to ALL streams ─────────────────────────────────
+  # These rules apply identically regardless of interval
+  # Severity and action are fixed — not overridable per stream
+
+  shared:
+
+    # Price relationship integrity (physically impossible if violated)
+    - rule: high_gte_low
+      description: High must be >= Low
+      severity: critical
+      action: reject_record
+
+    - rule: high_gte_open
+      description: High must be >= Open
+      severity: critical
+      action: reject_record
+
+    - rule: high_gte_close
+      description: High must be >= Close
+      severity: critical
+      action: reject_record
+
+    - rule: low_lte_open
+      description: Low must be <= Open
+      severity: critical
+      action: reject_record
+
+    - rule: low_lte_close
+      description: Low must be <= Close
+      severity: critical
+      action: reject_record
+
+    # Null checks
+    - rule: no_null_ohlcv
+      description: No null values in OHLCV fields
+      severity: critical
+      action: reject_record
+
+    # Price sanity
+    - rule: price_positive
+      description: All prices must be > 0
+      severity: critical
+      action: reject_record
+
+    - rule: prev_close_positive
+      description: Previous close must be > 0 if provided
+      severity: critical
+      action: reject_record
+
+    # Volume
+    - rule: volume_positive
+      description: Volume must be > 0 on active trading days
+      severity: warning
+      action: flag_record
+
+    - rule: pre_market_volume_non_negative
+      description: Pre-market volume cannot be negative
+      severity: critical
+      action: reject_record
+
+    # VWAP sanity (if provided)
+    - rule: vwap_between_low_and_high
+      description: VWAP must be between session Low and High
+      severity: critical
+      action: reject_record
+
+    # Statistical anomalies — thresholds overridden per stream
+    - rule: price_change_pct_threshold
+      description: Single bar price change exceeds stream threshold
+      severity: warning
+      action: flag_record
+      threshold: 50.0             # default — overridden by stream config
+
+    - rule: gap_threshold
+      description: Open gap from prev_close exceeds stream threshold
+      severity: warning
+      action: flag_record
+      threshold: 15.0             # default — overridden by stream config
+
+    # Corporate action consistency
+    - rule: corporate_action_consistency
+      description: Corporate action flags must be internally consistent
+      severity: warning
+      action: flag_record
+
+    # Amendment detection
+    - rule: amended_record_detected
+      description: Record is an amendment of a previously stored record
+      severity: warning
+      action: flag_record
+
+    # Pipeline audit
+    - rule: fetch_duration_threshold
+      description: API fetch exceeded maximum duration
+      severity: warning
+      action: flag_record
+      threshold: 30000            # ms — overridden by stream config
+
+    # Batch-level continuity (handled at batch level, not per-record)
+    - rule: max_consecutive_missing_days
+      description: Too many consecutive missing trading days
+      severity: warning
+      action: alert
+      threshold: 5                # days — overridden by stream config
+
+  # ── Daily stream additional rules ─────────────────────────────────────────
+  # Applied on TOP of shared rules for daily stream only
+  # These are also defined in streams/daily.yml under validation.additional_rules
+  # Listed here for documentation — actual loading is from stream config
+
+  daily:
+    - rule: no_weekend_dates
+      description: No records on Saturday or Sunday
+      severity: critical
+      action: reject_record
+
+  # ── Intraday stream additional rules ──────────────────────────────────────
+  # Phase 3 implementation — placeholders only
+  intraday:
+    - rule: bar_within_market_hours
+      description: Intraday bar must fall within configured market hours
+      severity: warning
+      action: flag_record
+
+    - rule: consistent_bar_spacing
+      description: Consecutive bars must be exactly one interval apart
+      severity: warning
+      action: flag_record
+
+  # ── Tick stream additional rules ───────────────────────────────────────────
+  # Phase 5 implementation — placeholders only
+  tick:
+    - rule: consecutive_zero_volume
+      description: Multiple consecutive bars with zero volume
+      severity: warning
+      action: flag_record
+      threshold: 3
+
+    - rule: tick_price_spike
+      description: Price deviates more than N standard deviations from recent mean
+      severity: warning
+      action: flag_record
+      std_dev_threshold: 3.0

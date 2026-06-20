@@ -1,0 +1,88 @@
+# TradeAnalytics — Tick Stream Configuration
+# Stream: 1m, 5m OHLCV data
+# Phase: 5 (DISABLED — enable only when live trading infrastructure ready)
+# Table: handh_trade.bronze.market_data_tick
+
+tick:
+  enabled: false
+  phase: 5
+  description: "Tick OHLCV — 1m/5m bars for live execution timing"
+
+  table: market_data_tick
+  rejected_table: market_data_rejected
+  watermark_table: ingestion_watermark_tick
+
+  intervals: ["1m", "5m"]
+
+  schedule:
+    cron: "0 17 * * 1-5"         # 5:00 PM Mon-Fri
+    timezone: "America/New_York"
+
+  history:
+    lookback_days: 90             # days not years — tick data is massive
+    retention_days: 90
+    amendment_buffer_days: 0      # no amendment buffer for tick
+
+  ingestion:
+    batch_size_days: 1            # one day at a time — tick volume is huge
+    max_gap_days: 7
+
+    history_extension:
+      enabled: false
+      extend_history_start: null
+      symbols: []
+
+    date_range_override:
+      enabled: false
+      start_date: null
+      end_date: null
+      symbols: []
+
+    restatement:
+      enabled: false
+      start_date: null
+      end_date: null
+      symbols: []
+
+    force_reload:
+      enabled: false
+      symbols: []
+      confirm: false
+
+  validation:
+    thresholds:
+      price_change_pct_threshold:   2.0    # tick: 2% per bar is extreme
+      gap_threshold:                1.0    # tick: 1% gap is suspicious
+      fetch_duration_ms:            10000  # tightest timeout
+      max_consecutive_missing_days: 1      # any missing day is critical for tick
+
+    provider_nullable_fields:
+      yahoo:
+        - vwap
+        - trade_count
+        - pre_market_high
+        - pre_market_low
+        - pre_market_close
+        - pre_market_volume
+        - post_market_high
+        - post_market_low
+        - post_market_close
+        - post_market_volume
+        - adj_factor
+        - exchange
+      ibkr: []
+      polygon: []
+
+    additional_rules:
+      - rule: consecutive_zero_volume   # Phase 5 implementation
+        severity: warning
+        action: flag_record
+        threshold: 3
+      - rule: tick_price_spike          # Phase 5 implementation
+        severity: warning
+        action: flag_record
+        std_dev_threshold: 3.0
+
+    disabled_rules:
+      - no_weekend_dates
+      - gap_threshold                   # tick gaps are normal between sessions

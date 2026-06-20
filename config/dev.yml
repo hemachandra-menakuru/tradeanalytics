@@ -1,4 +1,11 @@
+# TradeAnalytics — Infrastructure Configuration (dev)
+# Environment-specific: endpoints, buckets, cluster
+# Data sources → config/sources.yml
+# Stream configs → config/streams/*.yml
+# Risk → config/risk.yml
+
 environment: dev
+
 aws:
   region: us-east-1
   account_id: "311925399625"
@@ -9,30 +16,21 @@ aws:
     dbx_root: handh-trade-dbx-root-use1
 
 databricks:
-  workspace: handh-trade-dbx-prod
+  workspace: https://dbc-bf0075e6-07aa.cloud.databricks.com
   catalog: handh_trade
   schemas:
     bronze: bronze
     silver: silver
     gold: gold
     feature_store: feature_store
-    mlflow: mlflow
 
-data:
-  source: yahoo_finance
-  tickers:
-    - AAPL
-    - MSFT
-    - NVDA
-    - SPY
-    - QQQ
-  lookback_days: 365
-
-ml:
-  mlflow_experiment: /tradeanalytics/dev/experiments
-  model_registry: handh-trade-model-registry
+mlflow:
+  experiment_base: /tradeanalytics/dev
+  tracking_uri: databricks
 
 cluster:
   instance_type: m5.xlarge
   spot: true
   auto_terminate_minutes: 20
+  min_workers: 1
+  max_workers: 4

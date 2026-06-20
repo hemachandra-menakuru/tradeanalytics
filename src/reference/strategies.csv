@@ -1,0 +1,5 @@
+strategy_id,strategy_name,active,min_lookback_days,applicable_asset_classes,entry_indicators,exit_indicators,notes
+swing,Swing Trading,true,90,"equity,etf","ema15_above_ema45,volume_above_20d_avg,bullish_candle,rsi_between_40_70","ema15_below_ema45,price_at_resistance",Start here — simplest and most robust
+mean_reversion,Mean Reversion,false,60,"equity","rsi_below_30,price_near_15d_support,stochastics_oversold","rsi_above_50,price_at_resistance",Phase 4 — after swing is validated
+momentum,Momentum,false,120,"equity,etf","price_near_80d_high,abnormal_volume,macd_bullish,long_trend_bullish","volume_below_avg,macd_bearish",Phase 4 — after swing is validated
+breakout,Breakout,false,90,"equity","consolidation_detected,price_breaks_resistance,abnormal_volume","price_fails_resistance,volume_dries_up",Phase 4 — after swing is validated

@@ -1,0 +1,9 @@
+symbol,name,sector,asset_class,active,added_date,min_price,market_cap_tier,history_start,ipo_date,notes
+AAPL,Apple Inc,Technology,equity,true,2026-06-19,5.00,large,2016-01-01,1980-12-12,Core holding
+MSFT,Microsoft Corp,Technology,equity,true,2026-06-19,5.00,large,2016-01-01,1986-03-13,Core holding
+NVDA,NVIDIA Corp,Technology,equity,true,2026-06-19,5.00,large,2016-01-01,1999-01-22,High volatility
+GOOGL,Alphabet Inc,Technology,equity,true,2026-06-19,5.00,large,2016-01-01,2004-08-19,Core holding
+AMZN,Amazon.com Inc,Consumer Discretionary,equity,true,2026-06-19,5.00,large,2016-01-01,1997-05-15,Core holding
+JPM,JPMorgan Chase,Financials,equity,true,2026-06-19,5.00,large,2016-01-01,1969-01-01,Sector diversification
+SPY,S&P 500 ETF,ETF,etf,true,2026-06-19,5.00,large,2016-01-01,1993-01-22,Market benchmark
+QQQ,Nasdaq 100 ETF,ETF,etf,true,2026-06-19,5.00,large,2016-01-01,1999-03-10,Tech benchmark

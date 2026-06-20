@@ -1,0 +1,36 @@
+# TradeAnalytics — Data Source Configuration
+# Shared provider settings across ALL streams
+# Change provider here — affects daily, intraday, and tick equally
+
+sources:
+  primary: ibkr
+  fallback: yahoo
+
+  ibkr:
+    base_url: https://localhost:5000/v1/api
+    verify_ssl: false
+    timeout_seconds: 30
+    max_retries: 3
+    retry_delay_seconds: 2
+    account_id: ""              # injected from .env (IBKR_ACCOUNT_ID)
+    username: ""                # injected from .env (IBKR_USERNAME)
+    password: ""                # injected from .env (IBKR_PASSWORD)
+
+  yahoo:
+    timeout_seconds: 30
+    max_retries: 2
+    retry_delay_seconds: 5
+
+  polygon:                      # Future — Phase 5 if needed
+    base_url: https://api.polygon.io/v2
+    timeout_seconds: 30
+    max_retries: 3
+    retry_delay_seconds: 2
+    api_key: ""                 # injected from .env (POLYGON_API_KEY)
+
+  provider_fallback:
+    enabled: true
+    max_retries: 3
+    retry_delay_seconds: 30
+    fallback_on_empty: true     # fall back if provider returns empty data
+    fallback_on_error: true     # fall back if provider raises exception

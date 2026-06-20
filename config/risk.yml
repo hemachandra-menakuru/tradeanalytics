@@ -1,0 +1,39 @@
+# ============================================================
+# RISK PARAMETERS — Read carefully before changing any value.
+# These parameters directly control capital exposure.
+# All changes must be committed with a comment explaining why.
+# ============================================================
+
+risk:
+  # Per-trade limits
+  max_position_risk_pct: 2.0        # Max % of account at risk per single trade
+  max_position_size_pct: 10.0       # Max % of account in a single position
+
+  # Portfolio limits
+  max_portfolio_risk_pct: 10.0      # Max % of account at risk across all trades
+  max_open_positions: 5             # Max concurrent open positions
+  max_sector_concentration_pct: 30.0 # Max % of portfolio in one sector
+
+  # Kill switches
+  max_daily_loss_pct: 3.0           # Stop trading for the day if hit
+  max_weekly_loss_pct: 6.0          # Stop trading for the week if hit
+  max_monthly_drawdown_pct: 10.0    # Stop trading for the month if hit
+
+  # Position sizing method
+  sizing_method: atr_based          # atr_based | fixed_fractional | kelly
+  atr_period: 14                    # ATR lookback period in days
+  atr_stop_multiplier: 2.0          # Stop-loss distance = ATR x this multiplier
+  atr_target_multiplier: 3.0        # Take-profit distance = ATR x this multiplier
+  min_risk_reward_ratio: 1.5        # Minimum R:R required to take a trade
+
+  # Trade filters
+  min_price: 5.00                   # Ignore stocks below this price (avoid penny stocks)
+  min_avg_volume: 500000            # Minimum 30-day average daily volume
+  max_spread_pct: 0.5               # Max bid-ask spread as % of price
+
+  # Backtesting assumptions
+  commission_per_trade: 1.00        # USD per trade (IBKR fixed pricing)
+  slippage_pct: 0.1                 # Assumed slippage % per trade
+
+  # Emergency
+  kill_switch: false                # Set to true to halt all trading immediately

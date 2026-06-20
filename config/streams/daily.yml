@@ -1,0 +1,104 @@
+# TradeAnalytics — Daily Stream Configuration
+# Stream: 1d OHLCV data
+# Phase: 2 (ACTIVE)
+# Table: handh_trade.bronze.market_data_daily
+
+daily:
+  enabled: true
+  phase: 2
+  description: "Daily OHLCV — primary swing trading data stream"
+
+  # Target Delta tables
+  table: market_data_daily
+  rejected_table: market_data_rejected
+  watermark_table: ingestion_watermark_daily
+
+  # Intervals handled by this stream
+  intervals: ["1d"]
+
+  # Databricks job schedule
+  schedule:
+    cron: "0 19 * * 1-5"         # 7:00 PM Mon-Fri Eastern
+    timezone: "America/New_York"
+
+  # History settings
+  history:
+    lookback_years: 10
+    retention_years: 10
+    amendment_buffer_days: 3      # re-fetch last 3 days for provider corrections
+
+  # Ingestion operational settings
+  ingestion:
+    batch_size_days: 30
+    max_gap_days: 30              # gaps > 30 days treated as backfill
+
+    # ── Operational modes ────────────────────────────────────────────────────
+    # symbols: []  = ALL active symbols
+    # symbols: ["AAPL","MSFT"] = ONLY those symbols
+    # Always set enabled: false after completing a special run
+
+    history_extension:
+      enabled: false
+      extend_history_start: null  # e.g. "2010-01-01"
+      symbols: []
+
+    date_range_override:
+      enabled: false
+      start_date: null            # e.g. "2019-06-01"
+      end_date: null              # e.g. "2019-06-30"
+      symbols: []
+
+    restatement:
+      enabled: false
+      start_date: null
+      end_date: null
+      symbols: []
+
+    force_reload:
+      enabled: false
+      symbols: []
+      confirm: false              # MUST be true to execute — safety guard
+
+  # ── Validation configuration ──────────────────────────────────────────────
+  # Rule DEFINITIONS live in src/reference/data_quality_rules.yml
+  # These values OVERRIDE rule defaults for this stream only
+  validation:
+
+    # Threshold overrides — injected into matching rules at runtime
+    thresholds:
+      price_change_pct_threshold:   50.0   # daily: 50% single-day move is suspicious
+      gap_threshold:                15.0   # daily: 15% open gap is suspicious
+      fetch_duration_ms:            30000  # 30 seconds max API response time
+      max_consecutive_missing_days: 5      # alert if 5+ trading days missing
+
+    # Fields expected to be null for specific providers
+    # Prevents false quality flags when provider legitimately cannot supply field
+    provider_nullable_fields:
+      yahoo:
+        - vwap
+        - trade_count
+        - pre_market_high
+        - pre_market_low
+        - pre_market_close
+        - pre_market_volume
+        - post_market_high
+        - post_market_low
+        - post_market_close
+        - post_market_volume
+        - adj_factor
+        - exchange
+      ibkr: []                    # IBKR supplies all fields
+      polygon: []                 # Polygon supplies all fields
+
+    # Additional rules enabled ONLY for this stream
+    additional_rules:
+      - rule: no_weekend_dates
+        severity: critical
+        action: reject_record
+      - rule: vwap_between_low_and_high
+        severity: critical
+        action: reject_record
+
+    # Shared rules DISABLED for this stream
+    # Use sparingly — document reason for each
+    disabled_rules: []
