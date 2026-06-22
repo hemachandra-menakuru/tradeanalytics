@@ -23,6 +23,7 @@
 | Conda env | `tradeanalytics` (Python 3.11) |
 | Repo path (local) | `/Users/hemachandra/projects/tradeanalytics` (shell alias: `~/pr/tradeanalytics`) |
 | Active branch | `feature/phase2-data-ingestion` |
+| Git pager | Disabled — `git config --global core.pager cat` (already set) |
 
 ---
 
@@ -47,14 +48,14 @@ Adding a new component = implement ABC + register (one line) + update YAML. Zero
 - Amendments are new records with `record_version` incremented
 - Three-layer deduplication:
   - Layer 1: `IngestionPlanner` — correct date range (skip if up to date)
-  - Layer 2: `BronzeWriter._bulk_classify()` — bulk pre-fetch + in-memory classify (new / amend / skip)
+  - Layer 2: `BronzeWriter._bulk_classify()` — bulk pre-fetch + in-memory classify
   - Layer 3: Silver `ROW_NUMBER` window — exactly one record per key downstream
 - Rejected records go to `bronze.market_data_rejected` — queryable, reprocessable
 - **Records flow as plain dicts throughout the pipeline** — `BronzeRecord` is NOT instantiated
-  during ingestion. All audit fields are stamped in `validator._enrich_record()`
+  during ingestion. All audit fields stamped in `validator._enrich_record()`
 
 ### Data source (locked)
-- IBKR Client Portal REST API = **primary for all Phases 1–4** (runs on `localhost:5055`)
+- IBKR Client Portal REST API = **primary for all Phases 1-4** (runs on `localhost:5055`)
 - Yahoo Finance = **unit test fallback only**, never production
 - IBKR gateway: start with `bin/run.sh root/conf.yaml` in `~/dev/tools/ibkr/clientportal.gw`
 - To authenticate: `curl -sk -X POST https://localhost:5055/v1/api/iserver/reauthenticate`
@@ -82,7 +83,7 @@ Adding a new component = implement ABC + register (one line) + update YAML. Zero
 | Phase | Name | Status |
 |-------|------|--------|
 | 1 | Infrastructure | ✅ Complete |
-| 2 | Bronze Ingestion | ⏳ Code complete (249 tests passing), Databricks deployment pending |
+| 2 | Bronze Ingestion | ✅ Complete — smoke test passed, 2,636 SPY records in Delta |
 | 3 | Silver (Feature Engineering) | Not started |
 | 4 | Gold + Signal Platform | Not started |
 | 4b | Signal sharing (Telegram/API) | Not started |
@@ -90,15 +91,18 @@ Adding a new component = implement ABC + register (one line) + update YAML. Zero
 | 5b | Friends' execution bots | Not started |
 | 6 | Monetisation | Not started (legal review required first) |
 
-### Phase 2 remaining tasks (in order)
-1. ✅ Bronze Delta tables created and schema-verified in Unity Catalog
-2. ✅ All code fixes applied (see Section 7)
-3. ⬜ Add DABs job definition to `databricks.yml` — job `bronze_daily_ingestion`, schedule 7pm Mon–Fri Eastern, policy ID `001B2429FBD0E8AD`
-4. ⬜ Upload IBKR credentials to Databricks secret scope (`tradeanalytics`)
-5. ⬜ Deploy bundle to Databricks workspace
-6. ⬜ End-to-end smoke test on Databricks
-7. ⬜ Phase 2 docs: `TradeAnalytics_Phase2_Data_Ingestion_Guide.docx`
-8. ⬜ PR: merge `feature/phase2-data-ingestion` → main
+### Phase 2 remaining tasks
+1. ✅ All code + infrastructure complete
+2. ✅ Smoke test passed — 2,636 SPY records (2016-01-04 → 2026-06-18)
+3. ⬜ Phase 2 docs: `TradeAnalytics_Phase2_Data_Ingestion_Guide.docx`
+4. ⬜ PR: merge `feature/phase2-data-ingestion` → main
+
+### Phase 3 teaching approach (locked)
+- **Step by step — explain every concept before writing code**
+- No assumptions about prior ML knowledge
+- Explain what, why, and what the output means on real data
+- HC says if something isn't clear — go back and re-explain
+- Never rush ahead to code without concept explanation first
 
 ---
 
@@ -116,275 +120,203 @@ tradeanalytics/
 │       ├── intraday.yml         # Phase 3, disabled
 │       └── tick.yml             # Phase 5, disabled
 ├── src/
-│   ├── config/
-│   │   └── config_loader.py     # ConfigLoader + ConfigNode
+│   ├── config/config_loader.py
 │   ├── ingestion/
-│   │   ├── base/
-│   │   │   └── market_data_provider.py   # MarketDataProvider ABC
-│   │   ├── factory/
-│   │   │   └── provider_factory.py       # MarketDataFactory (registry)
-│   │   ├── jobs/
-│   │   │   └── bronze_ingestion_job.py   # BronzeIngestionJob + JobRunSummary
+│   │   ├── base/market_data_provider.py    # MarketDataProvider ABC
+│   │   ├── factory/provider_factory.py     # MarketDataFactory (registry)
+│   │   ├── jobs/bronze_ingestion_job.py    # BronzeIngestionJob + JobRunSummary
 │   │   ├── models/
-│   │   │   ├── bronze_record.py          # BronzeRecord (59 fields, 8 groups)
-│   │   │   ├── ingestion_mode.py         # IngestionMode enum, FetchPlan, IngestionWatermark
-│   │   │   └── ingestion_planner.py      # IngestionPlanner (8 priority modes)
+│   │   │   ├── bronze_record.py            # BronzeRecord (59 fields, 8 groups)
+│   │   │   ├── ingestion_mode.py           # IngestionMode, FetchPlan, IngestionWatermark
+│   │   │   └── ingestion_planner.py        # IngestionPlanner (8 modes)
 │   │   ├── providers/
-│   │   │   ├── ibkr_provider.py          # IBKRProvider (primary, live-verified)
-│   │   │   └── yahoo_provider.py         # YahooProvider (unit test fallback only)
-│   │   ├── readers/
-│   │   │   └── ticker_reader.py          # TickerReader + TickerInfo
+│   │   │   ├── ibkr_provider.py            # IBKRProvider (primary, live-verified)
+│   │   │   └── yahoo_provider.py           # YahooProvider (unit test fallback only)
+│   │   ├── readers/ticker_reader.py
 │   │   ├── validation/
-│   │   │   ├── models.py                 # ValidationSummary, ValidationResult
-│   │   │   ├── rule_engine.py            # RuleEngine (18 rules from YAML)
-│   │   │   └── validator.py              # DataQualityValidator
+│   │   │   ├── models.py
+│   │   │   ├── rule_engine.py              # RuleEngine (18 rules from YAML)
+│   │   │   └── validator.py               # DataQualityValidator
 │   │   └── writers/
-│   │       ├── bronze_writer.py          # BronzeWriter (bulk pre-fetch, local + Spark)
-│   │       └── watermark_manager.py      # WatermarkManager (local + Spark)
+│   │       ├── bronze_writer.py            # BronzeWriter (bulk pre-fetch, explicit schema)
+│   │       └── watermark_manager.py        # WatermarkManager (explicit StructType schema)
 │   └── reference/
-│       ├── tickers.csv                   # active ticker list
-│       └── data_quality_rules.yml        # shared rules (thresholds from stream config)
-├── notebooks/
-│   └── bronze_daily_ingestion.py         # Databricks entry point
-├── databricks.yml                        # DABs bundle definition
-└── tests/                                # 249 tests passing
+│       ├── tickers.csv
+│       └── data_quality_rules.yml
+├── notebooks/bronze_daily_ingestion.py     # Databricks entry point
+├── databricks.yml                          # DABs bundle (job ID: 174217366433843)
+└── tests/                                  # 249 tests passing
 ```
 
 ---
 
-## 5. Component Details & Key Patterns
+## 5. Key Component Patterns
 
-### ConfigLoader (`src/config/config_loader.py`)
-- Singleton, cached per environment
-- Load order: `dev.yml` → `sources.yml` → stream YAMLs (auto-discovered) → `risk.yml` → `logging.yml` → `.env` → env vars
-- Returns `ConfigNode` with dot-notation access: `config.sources.primary`, `config.daily.table`
-- Key method: `ConfigLoader.load(environment="dev")`, `ConfigLoader.reset()` (tests only)
-- Catalog read from: `config.databricks.catalog` (value: `"tradeanalytics"`)
-
-### MarketDataProvider ABC (`src/ingestion/base/market_data_provider.py`)
-- Abstract methods: `get_historical()`, `get_latest_quote()`, `get_options_chain()`, `is_market_open()`, `health_check()`
-- Abstract properties: `provider_name`, `supports_options`, `supports_realtime`, `supported_intervals`
-- All providers return standard OHLCV dict (see file docstring for full schema)
-- Exceptions: `ProviderConnectionError`, `ProviderAuthError`, `ProviderDataError`, `ProviderNotSupportedError`
-- `get_historical()` catches `ProviderAuthError` and `ProviderConnectionError` → returns `[]` gracefully
-
-### MarketDataFactory (`src/ingestion/factory/provider_factory.py`)
-- Registry pattern: `MarketDataFactory.register("ibkr", IBKRProvider)`
-- Both providers self-register at import time (bottom of their files)
-- Key methods: `get_provider(config)`, `get_fallback_provider(config)`, `get_provider_by_name(name, config)`
-- Config keys: `config.sources.primary` and `config.sources.fallback`
-
-### IBKRProvider (`src/ingestion/providers/ibkr_provider.py`)
-- Uses Client Portal REST API (no IB Gateway, no TWS)
-- Base URL: `https://localhost:5055/v1/api`
-- Self-signed SSL cert → `ssl.CERT_NONE`
-- `conid` cache avoids repeated contract searches
-- IBKR bar format: `o/h/l/c/v` + timestamp in milliseconds UTC
-- Period mapping: `_days_to_period()` converts days → IBKR period string (`{N}d`, `{N}w`, `{N}m`)
-- Live-verified: SPY + AAPL, 3 records returned correctly (week of 2026-06-16)
-- Graceful degradation: `get_historical()` returns `[]` on auth/connection errors
-- Stamps `ingested_by="ibkr_provider_v1"`, `fetch_attempt_count=1` on every record
-- Stamps `session_open=None`, `session_close=None` (not available from history endpoint)
-- Live tests guarded by `@requires_live_gateway` — skipped when gateway unauthenticated
-
-### YahooProvider (`src/ingestion/providers/yahoo_provider.py`)
-- **Unit test fallback only — never production**
-- Stamps `session_open=None`, `session_close=None` (not available from Yahoo)
-- `get_historical()` returns `[]` on errors, never raises
-
-### BronzeIngestionJob (`src/ingestion/jobs/bronze_ingestion_job.py`)
-- Orchestrates: IngestionPlanner → provider fetch → DataQualityValidator → BronzeWriter → WatermarkManager
-- `stream_interval = self._stream_cfg.intervals[0]` defined BEFORE ticker loop (prevents NameError in error handler)
-- Passes `plan.ingestion_type` to `validator.validate_batch()` so it flows to every record
-- `get_record_count()` used for accurate watermark `record_count` in both local and Spark modes
-- Error handler uses `stream_interval` (not undefined `interval`) for watermark failure updates
-
-### DataQualityValidator (`src/ingestion/validation/validator.py`)
-- `validate_batch(symbol, interval, batch_id, raw_records, pipeline_version, ingestion_type)`
-- `_enrich_record()` stamps ALL missing audit fields onto every clean/flagged record:
-  - **Group 7 (Data Quality):** `data_quality_flag`, `data_quality_reasons` (JSON string), `data_completeness_pct`
-  - **Group 8 (Pipeline Audit):** `batch_id`, `pipeline_version`, `record_version` (default 1), `ingested_at` (UTC ISO), `ingestion_type`, `is_amended` (False), `amendment_reason` (None), `supersedes_batch` (None), `ingested_by`, `fetch_attempt_count`
-  - **Group 4 (Session):** `session_open` (None), `session_close` (None)
-- `_compute_completeness()` — core fields weighted 80%, optional 20%
-- `provider_nullable_fields` in `daily.yml` is documented but not yet wired in (Phase 3 TODO)
-
-### RuleEngine (`src/ingestion/validation/rule_engine.py`)
-- 18 rules loaded from `src/reference/data_quality_rules.yml`
-- Thresholds injected from stream config at runtime (never hardcoded)
-- YAML-driven: adding a rule = 3 steps (rule definition + register + config), zero code changes
-
-### BronzeWriter (`src/ingestion/writers/bronze_writer.py`)
-- **Bulk pre-fetch deduplication** — `_bulk_classify()` fires ONE Spark query per `write_batch()` call
-- `_spark_bulk_fetch()` — single SQL with ROW_NUMBER window, fetches all keys in one round-trip
-- `_local_bulk_fetch()` — one pass over in-memory store (O(N))
-- Amendment detection compares: `open`, `high`, `low`, `close`, `volume`, `adj_close` (tolerance 0.001)
-  - `adj_close` included to catch retroactive split/dividend adjustments
-- `get_record_count(symbol, interval, table_name)` — real count for watermark (not hardcoded 0)
-- Catalog default: `"tradeanalytics"`
-
-### WatermarkManager (`src/ingestion/writers/watermark_manager.py`)
-- Uses MERGE (not append-only) — tracks current state per symbol+interval
-- `min(earliest, existing)` / `max(latest, existing)` — never moves dates in wrong direction
-- Watermark table: `tradeanalytics.bronze.ingestion_watermark_daily`
-
-### IngestionPlanner (`src/ingestion/models/ingestion_planner.py`)
-- 8 modes in priority order: `FORCE_RELOAD > RESTATEMENT > EXPLICIT_DATE_RANGE > HISTORY_EXTENSION > INITIAL_LOAD > GAP_FILL > INCREMENTAL > NO_OP`
-- Holiday calendar: `_US_MARKET_HOLIDAYS` covers **2010–2040** (NYSE schedule)
-  - TODO Phase 3: migrate to `tradeanalytics.reference.market_holidays` Unity Catalog table
-- Per-ticker `history_start` in `tickers.csv` overrides global `lookback_years`
-
-### BronzeRecord (`src/ingestion/models/bronze_record.py`)
-- **59 fields across 8 groups** — matches `tradeanalytics.bronze.market_data_daily` exactly
-- **NOT instantiated during ingestion** — records flow as plain dicts, all fields stamped by validator
-- `BronzeRecord.amend()` used only for explicit restatement runs
-- Groups: Identity · Raw Price · Adjusted Price · Session Context · Corporate Actions · Market Conditions · Data Quality · Pipeline Audit
-- Amendment fields (`is_amended`, `amendment_reason`, `supersedes_batch`) are in Group 8 (Pipeline Audit), not Group 7
-
----
-
-## 6. Databricks Notebook (`notebooks/bronze_daily_ingestion.py`)
-
-Key structure (cells in order):
+### BronzeWriter — critical Spark patterns
 ```python
-# Cell 1: Install deps BEFORE any imports
-subprocess.run(["pip", "install", "python-dotenv", "yfinance", "--quiet"])
+# _spark_append() — reads Delta schema FIRST, then aligns types
+table_schema = self._spark.table(full_table).schema  # primary
+# Fallback: DESCRIBE TABLE if schema empty (empty table edge case)
+# Type alignment: DateType→datetime.date, Double→float, Long/Int→int, Bool→bool
+# Prevents: CANNOT_DETERMINE_TYPE + FIELD_DATA_TYPE_UNACCEPTABLE
 
-# Cell 2: Logging setup
+# _bulk_classify() — ONE query per write_batch() call
+# _spark_bulk_fetch() — ROW_NUMBER window in single SQL
+# get_record_count() — real count for watermark (not 0)
+```
 
-# Cell 3: Add bundle path to sys.path
-bundle_path = "/Workspace/Users/handh.stocks@gmail.com/.bundle/tradeanalytics/dev/files"
-sys.path.insert(0, bundle_path)
+### WatermarkManager — Spark pattern
+```python
+# _spark_upsert_watermark() — explicit StructType with DateType
+# Converts earliest_date/latest_date strings → datetime.date before createDataFrame()
+```
 
-# Cell 4: Read widget parameters
-symbols    = [s.strip() for s in dbutils.widgets.get("symbols").split(",") if s.strip()] or None
-dry_run    = dbutils.widgets.get("dry_run").lower() == "true"
-as_of_date = date.fromisoformat(dbutils.widgets.get("as_of_date")) if as_of_date_param else None
+### DataQualityValidator — audit field stamping
+```python
+# _enrich_record() stamps ALL audit fields:
+# batch_id, pipeline_version, record_version(=1), ingested_at(UTC), ingestion_type,
+# is_amended(False), amendment_reason(None), supersedes_batch(None),
+# data_completeness_pct(computed), session_open(None), session_close(None),
+# ingested_by, fetch_attempt_count
+# data_completeness_pct=60 for IBKR (correct — IBKR supplies ~60% of optional fields)
+```
 
-# Cell 5: Load secrets
-os.environ["IBKR_ACCOUNT_ID"] = dbutils.secrets.get("tradeanalytics", "IBKR_ACCOUNT_ID")
+### BronzeIngestionJob — key patterns
+```python
+# stream_interval defined BEFORE ticker loop (prevents NameError in error handler)
+# run() accepts start_date/end_date override params
+# Passes plan.ingestion_type to validator.validate_batch()
+```
 
-# Cell 6: Load config
-ConfigLoader.reset()
-config = ConfigLoader.load(environment=os.getenv("ENVIRONMENT", "dev"))
-
-# Cell 7: Register providers — use config (IBKR primary, Yahoo fallback)
-# NOTE: Yahoo override REMOVED — notebook now uses IBKR as configured
+### Notebook — Cell 7 (provider registration)
+```python
+# NO config._data override — IBKR used as primary per config
 MarketDataFactory.register("ibkr",  IBKRProvider)
 MarketDataFactory.register("yahoo", YahooProvider)
-
-# Cell 8: Run job
-job = BronzeIngestionJob(config=config, stream_name="daily", spark=spark)
-summary = job.run(symbols=symbols, as_of_date=as_of_date, dry_run=dry_run)
-
-# Cell 9: Log results + display DataFrame
-
-# Cell 10: Raise on failure
+# Widgets: symbols, dry_run, as_of_date, start_date, end_date
 ```
 
-### DABs job (to be added to `databricks.yml`)
+---
+
+## 6. Databricks Job
+
 ```yaml
-job_name: bronze_daily_ingestion
-schedule: "0 0 19 * * ?"   # 7pm Eastern Mon–Fri
-cluster_policy_id: 001B2429FBD0E8AD
-status: PAUSED              # manual trigger until smoke test passes
+job_name:   "[dev handh_stocks] [dev] Bronze Daily Ingestion"
+job_id:     174217366433843
+schedule:   "0 0 19 * * ?" (7pm Eastern Mon-Fri)
+status:     PAUSED
+policy_id:  001B2429FBD0E8AD
+cluster:    m5.xlarge, 1 worker, SPOT_WITH_FALLBACK
+smoke_test_params:
+  symbols:    "SPY"
+  start_date: "2026-06-16"
+  end_date:   "2026-06-17"
+  dry_run:    "false"
+  as_of_date: ""
 ```
 
 ---
 
-## 7. All Fixes Applied This Session
+## 7. Smoke Test Results (2026-06-22)
 
-| Fix | File | Description |
-|-----|------|-------------|
-| N+1 Spark storm | `bronze_writer.py` | `_bulk_classify()` replaces per-record `_spark_get_existing()` |
-| `adj_close` amendment detection | `bronze_writer.py` | Retroactive split adjustments now detected |
-| `record_count=0` in Spark | `bronze_ingestion_job.py` | Uses `writer.get_record_count()` |
-| `pipeline_version` param removed | `bronze_writer.py` | Removed unused param from `write_batch()` |
-| Notebook Yahoo override | `bronze_daily_ingestion.py` | `config._data` mutation removed — IBKR used as configured |
-| IBKR graceful degradation | `ibkr_provider.py` | Returns `[]` on auth/connection errors |
-| Live gateway tests guarded | `test_provider_abstraction.py` | `@requires_live_gateway` skips when unauthenticated |
-| `ingested_by` + `fetch_attempt_count` | `ibkr_provider.py` | Stamped on every record |
-| `session_open/session_close` | `ibkr_provider.py`, `yahoo_provider.py` | Both providers stamp `None` |
-| 11 missing audit fields | `validator.py` | All stamped in `_enrich_record()` |
-| `ingestion_type` flow | `bronze_ingestion_job.py`, `validator.py` | Flows job → validator → every record |
-| `interval` NameError | `bronze_ingestion_job.py` | `stream_interval` defined before ticker loop |
-| Catalog rename | 8 files | `handh_trade` → `tradeanalytics` everywhere |
-| Holiday calendar | `ingestion_planner.py` | `_US_MARKET_HOLIDAYS` covers 2010–2040 |
-| Amendment fields group | `bronze_record.py` | Moved from Group 7 → Group 8 (Pipeline Audit) |
-| Dead config documented | `config/streams/daily.yml` | `provider_nullable_fields` marked Phase 3 TODO |
+| Check | Result |
+|-------|--------|
+| Job succeeded | ✅ 10m 16s |
+| Records written | ✅ 2,636 SPY (2016-01-04 → 2026-06-18) |
+| record_version | ✅ 1 |
+| ingestion_type | ✅ backfill |
+| data_quality_flag | ✅ false |
+| data_completeness_pct | ✅ 60 |
+| batch_id | ✅ populated |
+| ingested_at | ✅ UTC timestamp |
+| ingested_by | ⚠️ NULL (see Known Issues) |
+| Delta lineage | ✅ 2 upstream, 2 downstream tables |
 
 ---
 
-## 8. Config Key Reference
+## 8. Known Issues & Technical Debt
+
+### ⚠️ Date range override not working (investigate before next smoke test)
+`start_date`/`end_date` params passed to `job.run()` but IBKR returned full 10yr
+history instead of 2 days. Root cause: `_days_to_period()` in IBKRProvider may map
+short ranges to minimum IBKR period, or plan override code path not being hit.
+
+**Design alternatives to try next session:**
+- **Option A:** Filter records post-fetch in Python — drop anything outside start/end window
+  before validation. Safest — provider fetches what IBKR returns, Python filters.
+- **Option B:** Pass date constraints directly to `IBKRProvider.get_historical()` and
+  enforce strict date filtering inside the provider before returning records.
+- **Option C:** Update `daily.yml` `date_range_override` for smoke tests — but requires
+  updating tests that check `enabled: false` (feasible, just needs test update).
+- **Recommendation: Option A** — post-fetch filter is simplest, most robust, no API changes.
+
+### ⚠️ `ingested_by` is NULL in Delta
+IBKR provider sets `ingested_by="ibkr_provider_v1"` on raw records but field arrives
+as NULL in Delta. `validator._enrich_record()` uses `enriched.get("ingested_by", None)`
+which should preserve the value. Investigate whether it's being overwritten somewhere.
+
+### ⚠️ Duplicate records from failed smoke test runs
+Multiple rows for some dates from repeated failed runs. Bronze is append-only by design.
+Silver ROW_NUMBER dedup handles this. Do not DELETE from Bronze.
+
+### Phase 3 Technical Debt (fix during Phase 3)
+1. **BronzeRecord not instantiated** — records flow as dicts, all defaults bypassed.
+   Real fix: `validator` creates `BronzeRecord.from_dict()` → typed `to_dict()` output.
+   Removes need for manual type alignment in `_spark_append()` (560 lines → 3 lines).
+2. **`_process_ticker()` too long** (~150 lines) — split before adding Phase 4 hooks.
+3. **`provider_nullable_fields`** in `daily.yml` not consumed by validator — wire up.
+4. **Holiday calendar** — migrate to `tradeanalytics.reference.market_holidays` Delta table.
+5. **`additional_rules`** in config — verify RuleEngine handles list-of-dicts correctly.
+
+---
+
+## 9. Config Key Reference
 
 ```python
 config.databricks.catalog          # "tradeanalytics"
-config.databricks.schemas.bronze   # "bronze"
 config.sources.primary             # "ibkr"
 config.sources.fallback            # "yahoo"
 config.sources.ibkr.base_url       # "https://localhost:5055/v1/api"
-config.sources.ibkr.account_id     # from env IBKR_ACCOUNT_ID
 config.daily.enabled               # True
 config.daily.table                 # "market_data_daily"
 config.daily.rejected_table        # "market_data_rejected"
 config.daily.watermark_table       # "ingestion_watermark_daily"
 config.daily.intervals             # ["1d"]
-config.daily.validation.thresholds.*   # thresholds for daily stream
 ```
 
 ---
 
-## 9. Delta Tables
+## 10. Delta Tables
 
-| Table | Full Name | Fields | Type |
-|-------|-----------|--------|------|
-| Main bronze | `tradeanalytics.bronze.market_data_daily` | 59 | Append-only Delta |
-| Rejected | `tradeanalytics.bronze.market_data_rejected` | 18 | Append-only Delta |
-| Watermark | `tradeanalytics.bronze.ingestion_watermark_daily` | 10 | MERGE Delta |
+| Table | Full Name | Records |
+|-------|-----------|---------|
+| Main bronze | `tradeanalytics.bronze.market_data_daily` | 2,636 SPY |
+| Rejected | `tradeanalytics.bronze.market_data_rejected` | 0 |
+| Watermark | `tradeanalytics.bronze.ingestion_watermark_daily` | 1 (SPY) |
 
-S3 location: `s3://handh-trade-refined-use1/bronze/`
-All 3 tables schema-verified — perfect field match with BronzeRecord.to_dict() and RejectedRecord.to_dict()
-
----
-
-## 10. S3 Buckets
-
-| Bucket | Purpose |
-|--------|---------|
-| `handh-trade-raw-use1` | Raw source data |
-| `handh-trade-refined-use1` | Delta tables (bronze/silver/gold) |
-| `handh-trade-mlflow-use1` | MLflow artifacts |
-| `handh-trade-dbx-root-use1` | Databricks workspace root |
+S3: `s3://handh-trade-refined-use1/bronze/`
 
 ---
 
-## 11. Known Issues & Deferred Items
+## 11. Phase 3 Preview (Silver — Feature Engineering)
 
-### Phase 3 TODO: `provider_nullable_fields`
-`config/streams/daily.yml` documents which fields each provider cannot supply (e.g. Yahoo cannot supply `vwap`, `trade_count`). This config is not yet consumed by `DataQualityValidator`. Wire it into `_enrich_record()` in Phase 3 to prevent false DQ flags for provider-declared nulls.
-
-### Phase 3 TODO: Holiday calendar reference table
-`_US_MARKET_HOLIDAYS` (2010–2040) is hardcoded in `ingestion_planner.py`. Migrate to `tradeanalytics.reference.market_holidays` Unity Catalog table in Phase 3.
-
-### Phase 3 TODO: BronzeRecord instantiation
-Records flow as plain dicts in Phase 2. In Phase 3, refactor validator to instantiate `BronzeRecord` from raw provider dicts → `to_dict()` for Silver compatibility. All audit fields currently stamped manually in `_enrich_record()`.
-
-### Phase 3 TODO: `additional_rules` parsing
-`daily.yml` defines `additional_rules` as a list of dicts. Verify `RuleEngine` processes them correctly (not as plain strings).
-
----
-
-## 12. Phase 3 Preview (Silver — Feature Engineering)
+Step-by-step teaching order:
+1. What is a feature? (EMA, RSI, MACD on real SPY data — visualise first)
+2. What is a label? (forward returns — what are we predicting and why?)
+3. What is the feature matrix? (rows=dates, cols=features — read before training)
+4. Train first XGBoost on SPY
+5. Walk-forward validation — out-of-sample IC
+6. Does it actually have edge?
 
 Planned ABCs: `IndicatorEngine`, `FeatureEngineer`, `FeatureScaler`, `RegimeDetector`
-Key components: Hurst Exponent (weekly routing), HMM (bar-level feature), feature store (`tradeanalytics.feature_store.*`)
-Intraday stream activation: 1h/4h
+Feature store: `tradeanalytics.feature_store.*`
 
 ---
 
-## 13. Session Start Checklist
+## 12. Session Start Checklist
 
-When starting a new session:
 1. Upload this `CLAUDE.md` file first
-2. Confirm with HC: any changes since last session? (new commits, config changes, test failures)
-3. State the immediate task — next up: DABs job definition in `databricks.yml`
-4. Run `python -m pytest tests/ -q` to confirm 249 tests still passing before any changes
+2. Confirm: any changes since last session?
+3. Run `python -m pytest tests/ -q` — confirm 249 tests passing
+4. State the immediate task
+5. **Next up:** Phase 2 docs → PR → merge → Phase 3
