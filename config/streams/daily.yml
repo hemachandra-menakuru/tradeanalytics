@@ -1,3 +1,4 @@
+
 # TradeAnalytics — Daily Stream Configuration
 # Stream: 1d OHLCV data
 # Phase: 2 (ACTIVE)
@@ -71,8 +72,11 @@ daily:
       fetch_duration_ms:            30000  # 30 seconds max API response time
       max_consecutive_missing_days: 5      # alert if 5+ trading days missing
 
-    # Fields expected to be null for specific providers
-    # Prevents false quality flags when provider legitimately cannot supply field
+    # Fields expected to be null for specific providers.
+    # Documents which fields each provider cannot supply — prevents
+    # false DQ flags when a provider legitimately returns None.
+    # TODO Phase 3: wire this into DataQualityValidator._enrich_record()
+    #   so null-field rules skip validation for declared-null fields.
     provider_nullable_fields:
       yahoo:
         - vwap
@@ -87,8 +91,8 @@ daily:
         - post_market_volume
         - adj_factor
         - exchange
-      ibkr: []                    # IBKR supplies all fields
-      polygon: []                 # Polygon supplies all fields
+      ibkr: []                    # IBKR supplies all declared fields
+      polygon: []                 # Polygon supplies all declared fields
 
     # Additional rules enabled ONLY for this stream
     additional_rules:
@@ -102,3 +106,4 @@ daily:
     # Shared rules DISABLED for this stream
     # Use sparingly — document reason for each
     disabled_rules: []
+

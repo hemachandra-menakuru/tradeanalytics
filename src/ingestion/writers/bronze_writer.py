@@ -95,8 +95,10 @@ class BronzeWriter:
         result = writer.write_batch(symbol, interval, batch_id, ...)
     """
 
-    # Price fields compared during amendment detection
-    _PRICE_FIELDS = ["open", "high", "low", "close", "volume"]
+    # Price fields compared during amendment detection.
+    # adj_close included — retroactive split/dividend adjustments must be
+    # detected as amendments even when raw OHLCV is unchanged.
+    _PRICE_FIELDS = ["open", "high", "low", "close", "volume", "adj_close"]
     _PRICE_TOLERANCE = 0.001
 
     def __init__(

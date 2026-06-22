@@ -1,3 +1,4 @@
+
 """
 TradeAnalytics IBKR Client Portal REST API Provider
 =====================================================
@@ -503,6 +504,8 @@ class IBKRProvider(MarketDataProvider):
                 "trade_count":     None,  # not in history endpoint
                 "vwap":            None,  # not in history endpoint
                 "prev_close":      None,  # not available in batch
+                "session_open":    None,  # not in history endpoint
+                "session_close":   None,  # not in history endpoint
 
                 # Pre/post market
                 "pre_market_high":    None,
@@ -551,3 +554,4 @@ class IBKRProvider(MarketDataProvider):
 # Self-register with factory
 from src.ingestion.factory.provider_factory import MarketDataFactory
 MarketDataFactory.register("ibkr", IBKRProvider)
+

@@ -1,3 +1,4 @@
+
 """
 TradeAnalytics Bronze Ingestion Job
 =====================================
@@ -233,6 +234,10 @@ class BronzeIngestionJob:
                 f"{self._provider.provider_name}"
             )
 
+        # interval is the primary interval for this stream — needed in
+        # error handler below where _process_ticker may not have run yet
+        stream_interval = self._stream_cfg.intervals[0]
+
         # Process each ticker
         for ticker in tickers:
             try:
@@ -257,12 +262,12 @@ class BronzeIngestionJob:
                 # Update watermark with failure status
                 try:
                     wm = self._watermark_mgr.get_watermark(
-                        ticker.symbol, interval
+                        ticker.symbol, stream_interval
                     )
                     if wm is not None:
                         self._watermark_mgr.update_watermark(
                             symbol=ticker.symbol,
-                            interval=interval,
+                            interval=stream_interval,
                             earliest_date=wm.earliest_date,
                             latest_date=wm.latest_date,
                             record_count=wm.record_count,
@@ -349,6 +354,7 @@ class BronzeIngestionJob:
             batch_id=batch_id,
             raw_records=raw_records,
             pipeline_version=self._pipeline_version,
+            ingestion_type=plan.ingestion_type,
         )
 
         logger.info(
@@ -468,3 +474,4 @@ class BronzeIngestionJob:
         """Generate unique batch ID for this job run."""
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         return f"batch_{self._stream_name}_{timestamp}"
+
