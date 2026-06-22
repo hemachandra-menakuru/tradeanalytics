@@ -359,29 +359,51 @@ class BronzeWriter:
         # For each field in the table schema, pull the value from the record
         # (or None if missing). This guarantees every column is present and
         # typed correctly — no all-None columns that confuse Spark inference.
-        type_map = {
-            "StringType": str,
-            "DoubleType": float,
-            "LongType": int,
-            "IntegerType": int,
-            "BooleanType": bool,
-        }
+        # DateType fields must be python datetime.date objects (not strings).
+        from datetime import date as _date, datetime as _datetime
 
         aligned_records = []
         for record in records:
             aligned = {}
             for field in table_schema.fields:
                 val = record.get(field.name)
-                # Cast to correct Python type if not None
-                if val is not None:
-                    type_name = type(field.dataType).__name__
-                    py_type = type_map.get(type_name)
-                    if py_type is not None:
-                        try:
-                            val = py_type(val)
-                        except (ValueError, TypeError):
-                            val = None
-                aligned[field.name] = val
+                if val is None:
+                    aligned[field.name] = None
+                    continue
+
+                type_name = type(field.dataType).__name__
+
+                try:
+                    if type_name == "DateType":
+                        # DateType requires python datetime.date
+                        if isinstance(val, _date):
+                            aligned[field.name] = val
+                        else:
+                            aligned[field.name] = _date.fromisoformat(str(val)[:10])
+                    elif type_name == "TimestampType":
+                        # TimestampType requires python datetime
+                        if isinstance(val, _datetime):
+                            aligned[field.name] = val
+                        else:
+                            aligned[field.name] = _datetime.fromisoformat(str(val))
+                    elif type_name == "DoubleType":
+                        aligned[field.name] = float(val)
+                    elif type_name in ("LongType", "IntegerType"):
+                        aligned[field.name] = int(val)
+                    elif type_name == "BooleanType":
+                        aligned[field.name] = bool(val)
+                    elif type_name == "StringType":
+                        aligned[field.name] = str(val)
+                    else:
+                        # Unknown type — pass through as-is
+                        aligned[field.name] = val
+                except (ValueError, TypeError) as e:
+                    logger.debug(
+                        f"Type cast failed for field {field.name} "
+                        f"(type={type_name}, val={val!r}): {e} — setting None"
+                    )
+                    aligned[field.name] = None
+
             aligned_records.append(aligned)
 
         # Step 3: Create DataFrame with explicit schema
