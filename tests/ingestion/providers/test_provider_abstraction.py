@@ -109,21 +109,24 @@ def test_ibkr_supports_4h_interval(ibkr_provider):
     assert ibkr_provider.supports_interval("4h") == True
 
 
-def test_ibkr_health_check_returns_false_when_stub(ibkr_provider):
-    """IBKR stub returns False until Client Portal is configured."""
-    assert ibkr_provider.health_check() == False
+def test_ibkr_health_check_returns_bool(ibkr_provider):
+    """IBKR health_check returns bool — True if gateway running, False if not."""
+    result = ibkr_provider.health_check()
+    assert isinstance(result, bool)
 
 
-def test_ibkr_get_historical_returns_empty_when_stub(ibkr_provider):
-    """IBKR stub returns empty list."""
+def test_ibkr_get_historical_returns_list(ibkr_provider):
+    """IBKR get_historical returns a list (may be empty if gateway not running)."""
     result = ibkr_provider.get_historical(
         "AAPL", date(2026, 1, 1), date(2026, 6, 19)
     )
-    assert result == []
+    assert isinstance(result, list)
 
 
-def test_ibkr_get_latest_quote_returns_none_when_stub(ibkr_provider):
-    assert ibkr_provider.get_latest_quote("AAPL") is None
+def test_ibkr_get_latest_quote_returns_dict_or_none(ibkr_provider):
+    """IBKR get_latest_quote returns dict if gateway running, None if not."""
+    result = ibkr_provider.get_latest_quote("AAPL")
+    assert result is None or isinstance(result, dict)
 
 
 def test_ibkr_get_options_chain_returns_empty_when_stub(ibkr_provider):
