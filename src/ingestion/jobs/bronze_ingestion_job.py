@@ -257,12 +257,12 @@ class BronzeIngestionJob:
                 # Update watermark with failure status
                 try:
                     wm = self._watermark_mgr.get_watermark(
-                        ticker.symbol, "1d"
+                        ticker.symbol, interval
                     )
                     if wm is not None:
                         self._watermark_mgr.update_watermark(
                             symbol=ticker.symbol,
-                            interval="1d",
+                            interval=interval,
                             earliest_date=wm.earliest_date,
                             latest_date=wm.latest_date,
                             record_count=wm.record_count,
@@ -299,7 +299,7 @@ class BronzeIngestionJob:
         Returns BronzeWriteResult or None if NO_OP.
         """
         symbol   = ticker.symbol
-        interval = self._stream_cfg.intervals[0]  # primary interval for stream
+        interval = self._stream_cfg.intervals[0]  # primary interval for stream — single source of truth
 
         # Step 1: Read watermark
         watermark = self._watermark_mgr.get_watermark(symbol, interval)
@@ -366,7 +366,6 @@ class BronzeIngestionJob:
             clean_records=validation_summary.writable_records,
             rejected_records=validation_summary.rejected_records,
             stream_cfg=self._stream_cfg,
-            pipeline_version=self._pipeline_version,
         )
 
         # Step 7: Update watermark
@@ -389,10 +388,10 @@ class BronzeIngestionJob:
                     interval=interval,
                     earliest_date=min_date,
                     latest_date=max_date,
-                    record_count=(
-                        self._writer.get_local_record_count(
-                            self._stream_cfg.table
-                        ) if self._mode == "local" else 0
+                    record_count=self._writer.get_record_count(
+                        symbol=symbol,
+                        interval=interval,
+                        table_name=self._stream_cfg.table,
                     ),
                     batch_id=batch_id,
                     mode=plan.mode.value,
