@@ -1,3 +1,4 @@
+
 """
 TradeAnalytics Bronze Writer
 =============================
@@ -17,16 +18,14 @@ Write rules (Bronze is APPEND-ONLY):
 
 Deduplication happens at THREE layers:
   Layer 1: IngestionPlanner — determines correct date range (skip if up to date)
-  Layer 2: DuplicateDetector — classifies each record as new/amend/skip
+  Layer 2: BronzeWriter._bulk_classify() — classifies all records in ONE query
   Layer 3: Silver ROW_NUMBER — ensures exactly one record per key downstream
 """
 
 from __future__ import annotations
 
-import json
 import logging
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -71,26 +70,43 @@ class BronzeWriteResult:
         )
 
 
+# Type alias for the bulk lookup dict
+# Key: (symbol, date, interval, bar_time_utc)  — bar_time_utc is None for daily
+# Value: dict of the latest existing record for that key
+_ExistingRecordMap = Dict[Tuple, dict]
+
+
 class BronzeWriter:
     """
     Writes validated OHLCV records to Bronze Delta tables.
     Supports both Spark (Databricks) and local (in-memory) modes.
 
+    Layer 2 deduplication uses a BULK pre-fetch strategy:
+      - ONE query fetches all existing records for the incoming symbol + dates
+      - Classification (new / amend / skip) happens in-memory against a dict
+      - This avoids the N+1 Spark query problem (one query per record)
+
     Usage:
         # Local / test mode (default)
         writer = BronzeWriter(mode="local")
-        result = writer.write_batch(symbol, interval, batch_id, summary)
+        result = writer.write_batch(symbol, interval, batch_id, ...)
 
         # Databricks mode
         writer = BronzeWriter(mode="spark", spark=spark_session)
-        result = writer.write_batch(symbol, interval, batch_id, summary)
+        result = writer.write_batch(symbol, interval, batch_id, ...)
     """
+
+    # Price fields compared during amendment detection.
+    # adj_close included — retroactive split/dividend adjustments must be
+    # detected as amendments even when raw OHLCV is unchanged.
+    _PRICE_FIELDS = ["open", "high", "low", "close", "volume", "adj_close"]
+    _PRICE_TOLERANCE = 0.001
 
     def __init__(
         self,
         mode: str = "local",
         spark=None,
-        catalog: str = "handh_trade",
+        catalog: str = "tradeanalytics",
         schema: str = "bronze",
     ):
         """
@@ -113,6 +129,10 @@ class BronzeWriter:
 
         logger.info(f"BronzeWriter initialised — mode={mode}")
 
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     def write_batch(
         self,
         symbol: str,
@@ -121,10 +141,12 @@ class BronzeWriter:
         clean_records: List[dict],
         rejected_records: List[dict],
         stream_cfg,
-        pipeline_version: str = "unknown",
     ) -> BronzeWriteResult:
         """
-        Write validated records from a ValidationSummary to Bronze tables.
+        Write validated records to Bronze tables.
+
+        Layer 2 deduplication is performed here via a single bulk pre-fetch
+        (one query for the entire batch, not one query per record).
 
         Args:
             symbol:           Ticker symbol
@@ -133,7 +155,6 @@ class BronzeWriter:
             clean_records:    Passed + flagged records → main table
             rejected_records: Rejected records → rejected table
             stream_cfg:       Stream config node (has table names)
-            pipeline_version: Git SHA
 
         Returns:
             BronzeWriteResult with counts and timing
@@ -144,19 +165,10 @@ class BronzeWriter:
         main_table     = stream_cfg.table
         rejected_table = stream_cfg.rejected_table
 
-        # Layer 2 deduplication — classify each record
-        new_records   = []
-        amended       = []
-        skipped_count = 0
-
-        for record in clean_records:
-            action = self._classify_record(record, main_table)
-            if action == "new":
-                new_records.append(record)
-            elif action == "amend":
-                amended.append(record)
-            else:  # skip
-                skipped_count += 1
+        # Layer 2 deduplication — bulk classify (ONE query total)
+        new_records, amended, skipped_count = self._bulk_classify(
+            clean_records, main_table
+        )
 
         # Write new records
         if new_records:
@@ -202,115 +214,260 @@ class BronzeWriter:
             table_name=main_table,
         )
 
-    def _classify_record(self, record: dict, table_name: str) -> str:
-        """
-        Layer 2 deduplication — classify incoming record.
-
-        Returns:
-            "new"   — no existing record for this key, write it
-            "amend" — existing record but data changed, write amendment
-            "skip"  — exact duplicate, skip
-        """
-        existing = self._get_existing_record(record, table_name)
-
-        if existing is None:
-            return "new"
-
-        # Compare price fields with tolerance
-        price_fields = ["open", "high", "low", "close", "volume"]
-        tolerance    = 0.001
-
-        for field in price_fields:
-            existing_val = existing.get(field)
-            incoming_val = record.get(field)
-
-            if existing_val is None or incoming_val is None:
-                continue
-
-            if abs(float(existing_val) - float(incoming_val)) > tolerance:
-                # Data changed — this is a legitimate amendment
-                return "amend"
-
-        return "skip"
-
-    def _get_existing_record(
+    def get_record_count(
         self,
-        record: dict,
+        symbol: str,
+        interval: str,
         table_name: str,
-    ) -> Optional[dict]:
+    ) -> int:
         """
-        Find the most recent existing record for this unique key.
-        Local mode: searches in-memory store.
-        Spark mode: queries Delta table.
+        Return total Bronze record count for a symbol + interval.
+        Used by BronzeIngestionJob to populate watermark record_count.
         """
         if self._mode == "local":
-            return self._local_get_existing(record, table_name)
+            return sum(
+                1 for r in self._local_store.get(table_name, [])
+                if r.get("symbol") == symbol and r.get("interval") == interval
+            )
         else:
-            return self._spark_get_existing(record, table_name)
+            return self._spark_count_records(symbol, interval, table_name)
 
-    def _local_get_existing(
+    def get_local_records(self, table_name: str) -> List[dict]:
+        """Return all records in local store for a table (test helper)."""
+        return self._local_store.get(table_name, [])
+
+    def get_local_record_count(self, table_name: str) -> int:
+        """Return total record count in local store for a table (test helper)."""
+        return len(self.get_local_records(table_name))
+
+    def clear_local_store(self) -> None:
+        """Clear all local store data (test helper)."""
+        self._local_store.clear()
+
+    # ------------------------------------------------------------------
+    # Layer 2 deduplication — bulk classify
+    # ------------------------------------------------------------------
+
+    def _bulk_classify(
         self,
-        record: dict,
+        records: List[dict],
         table_name: str,
-    ) -> Optional[dict]:
-        """Search local in-memory store for existing record."""
-        if table_name not in self._local_store:
-            return None
+    ) -> Tuple[List[dict], List[dict], int]:
+        """
+        Classify all incoming records in a single bulk operation.
 
-        symbol   = record.get("symbol")
-        date_val = record.get("date")
-        interval = record.get("interval")
-        bar_time = record.get("bar_time_utc")
+        Strategy:
+          1. Build a set of (symbol, date, interval, bar_time_utc) keys
+             from the incoming records.
+          2. Fetch ALL existing records matching those keys in ONE query.
+          3. Build an in-memory lookup dict keyed on the composite key,
+             storing the latest record_version for each key.
+          4. Classify each incoming record against the dict — pure Python,
+             zero additional I/O.
 
-        # Find matching records — get latest version
-        matches = []
-        for existing in self._local_store[table_name]:
-            if (existing.get("symbol")   == symbol and
-                existing.get("date")     == date_val and
-                existing.get("interval") == interval):
+        Returns:
+            (new_records, amended_records, skipped_count)
+        """
+        if not records:
+            return [], [], 0
 
-                # For intraday, also match bar_time
-                if bar_time is not None:
-                    if existing.get("bar_time_utc") != bar_time:
-                        continue
-                matches.append(existing)
+        # Step 1 — build key set from incoming batch
+        incoming_keys = self._extract_keys(records)
 
-        if not matches:
-            return None
+        # Step 2 — bulk fetch existing records for those keys (ONE query)
+        existing_map = self._bulk_fetch_existing(incoming_keys, table_name)
 
-        # Return latest version
-        return max(matches, key=lambda r: r.get("record_version", 1))
+        # Step 3 — classify each record in-memory
+        new_records = []
+        amended     = []
+        skipped     = 0
 
-    def _spark_get_existing(
+        for record in records:
+            key      = self._record_key(record)
+            existing = existing_map.get(key)
+
+            if existing is None:
+                new_records.append(record)
+            elif self._has_price_changed(existing, record):
+                amended.append(record)
+            else:
+                skipped += 1
+
+        return new_records, amended, skipped
+
+    def _extract_keys(
         self,
-        record: dict,
-        table_name: str,
-    ) -> Optional[dict]:
-        """Query Delta table for existing record. Databricks only."""
-        symbol   = record.get("symbol")
-        date_val = record.get("date")
-        interval = record.get("interval")
+        records: List[dict],
+    ) -> List[Tuple]:
+        """Extract unique composite keys from a list of records."""
+        seen = set()
+        keys = []
+        for r in records:
+            k = self._record_key(r)
+            if k not in seen:
+                seen.add(k)
+                keys.append(k)
+        return keys
 
+    def _record_key(self, record: dict) -> Tuple:
+        """
+        Composite deduplication key for one record.
+        bar_time_utc is None for daily records.
+        """
+        return (
+            record.get("symbol"),
+            record.get("date"),
+            record.get("interval"),
+            record.get("bar_time_utc"),  # None for daily
+        )
+
+    def _has_price_changed(self, existing: dict, incoming: dict) -> bool:
+        """Return True if any price field differs beyond tolerance."""
+        for field in self._PRICE_FIELDS:
+            existing_val = existing.get(field)
+            incoming_val = incoming.get(field)
+            if existing_val is None or incoming_val is None:
+                continue
+            if abs(float(existing_val) - float(incoming_val)) > self._PRICE_TOLERANCE:
+                return True
+        return False
+
+    # ------------------------------------------------------------------
+    # Bulk fetch — one query per write_batch call
+    # ------------------------------------------------------------------
+
+    def _bulk_fetch_existing(
+        self,
+        keys: List[Tuple],
+        table_name: str,
+    ) -> _ExistingRecordMap:
+        """
+        Fetch the latest existing record for each key in a single operation.
+
+        Returns:
+            Dict mapping composite key → latest existing record dict.
+            Keys with no existing record are absent from the dict.
+        """
+        if not keys:
+            return {}
+
+        if self._mode == "local":
+            return self._local_bulk_fetch(keys, table_name)
+        else:
+            return self._spark_bulk_fetch(keys, table_name)
+
+    def _local_bulk_fetch(
+        self,
+        keys: List[Tuple],
+        table_name: str,
+    ) -> _ExistingRecordMap:
+        """
+        Build lookup dict from in-memory store.
+        One pass over the store — O(N) where N = stored records.
+        """
+        store = self._local_store.get(table_name, [])
+        if not store:
+            return {}
+
+        key_set = set(keys)
+
+        # Collect all matching records grouped by key
+        candidates: Dict[Tuple, List[dict]] = {}
+        for record in store:
+            k = self._record_key(record)
+            if k in key_set:
+                candidates.setdefault(k, []).append(record)
+
+        # For each key keep only the latest record_version
+        return {
+            k: max(recs, key=lambda r: r.get("record_version", 1))
+            for k, recs in candidates.items()
+        }
+
+    def _spark_bulk_fetch(
+        self,
+        keys: List[Tuple],
+        table_name: str,
+    ) -> _ExistingRecordMap:
+        """
+        Fetch existing records from Delta table in ONE Spark query.
+
+        Builds a WHERE clause with OR conditions for all (symbol, date,
+        interval) combinations, then picks the latest record_version
+        per key using a window function — all inside one SQL statement.
+        """
         full_table = f"{self._catalog}.{self._schema}.{table_name}"
 
+        # Build the IN-clause predicate
+        # Keys are (symbol, date, interval, bar_time_utc)
+        # For daily streams bar_time_utc is None — we only filter on 3 fields
+        # For intraday bar_time_utc is set — filter on all 4
+
+        # Separate daily (bar_time_utc=None) from intraday keys
+        daily_keys    = [(s, d, i) for s, d, i, bt in keys if bt is None]
+        intraday_keys = [(s, d, i, bt) for s, d, i, bt in keys if bt is not None]
+
+        predicates = []
+
+        if daily_keys:
+            # Use (symbol, date, interval) IN ((...), (...), ...)
+            tuples = ", ".join(
+                f"('{s}', '{d}', '{iv}')"
+                for s, d, iv in daily_keys
+            )
+            predicates.append(
+                f"(symbol, CAST(date AS STRING), interval) IN ({tuples})"
+            )
+
+        if intraday_keys:
+            tuples = ", ".join(
+                f"('{s}', '{d}', '{iv}', '{bt}')"
+                for s, d, iv, bt in intraday_keys
+            )
+            predicates.append(
+                f"(symbol, CAST(date AS STRING), interval, "
+                f"CAST(bar_time_utc AS STRING)) IN ({tuples})"
+            )
+
+        if not predicates:
+            return {}
+
+        where_clause = " OR ".join(f"({p})" for p in predicates)
+
+        # Single query — window function picks latest version per key
+        query = f"""
+            SELECT *
+            FROM (
+                SELECT *,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY symbol, date, interval, bar_time_utc
+                        ORDER BY record_version DESC
+                    ) AS _rn
+                FROM {full_table}
+                WHERE {where_clause}
+            )
+            WHERE _rn = 1
+        """
+
         try:
-            df = self._spark.sql(f"""
-                SELECT * FROM {full_table}
-                WHERE symbol = '{symbol}'
-                  AND date = '{date_val}'
-                  AND interval = '{interval}'
-                ORDER BY record_version DESC
-                LIMIT 1
-            """)
-            if df.count() == 0:
-                return None
-            return df.first().asDict()
+            df = self._spark.sql(query)
+            result: _ExistingRecordMap = {}
+            for row in df.collect():
+                r = row.asDict()
+                r.pop("_rn", None)
+                k = self._record_key(r)
+                result[k] = r
+            return result
         except Exception as e:
             logger.warning(
-                f"Could not query existing record from {full_table}: {e}. "
-                f"Treating as new record."
+                f"Bulk fetch from {full_table} failed: {e}. "
+                f"Treating all records as new (safe — Bronze is append-only)."
             )
-            return None
+            return {}
+
+    # ------------------------------------------------------------------
+    # Write helpers
+    # ------------------------------------------------------------------
 
     def _append_records(self, records: List[dict], table_name: str) -> None:
         """Append records to table (local or Spark)."""
@@ -325,21 +482,17 @@ class BronzeWriter:
         """
         Append records to Delta table using Spark.
 
-        Uses the existing Delta table schema to create the DataFrame — this
-        avoids PySparkValueError: CANNOT_DETERMINE_TYPE which occurs when
-        Spark infers schema from dicts that contain all-None columns.
+        Uses the existing Delta table schema to create the DataFrame — avoids:
+          - PySparkValueError: CANNOT_DETERMINE_TYPE (all-None columns)
+          - PySparkTypeError: FIELD_DATA_TYPE_UNACCEPTABLE (string→DateType)
 
         Strategy:
-          1. Read the existing table schema from the Delta table
-          2. Cast/align each record dict to that schema
-          3. Create DataFrame with explicit schema → no type inference
+          1. Read existing table schema from Delta
+          2. Align each record dict to that schema with correct Python types
+          3. Create DataFrame with explicit schema — no type inference
           4. Append to Delta table
         """
-        from pyspark.sql.functions import lit
-        from pyspark.sql.types import (
-            StringType, DoubleType, LongType, IntegerType,
-            BooleanType, DateType, TimestampType, StructType, StructField
-        )
+        from datetime import date as _date, datetime as _datetime
 
         full_table = f"{self._catalog}.{self._schema}.{table_name}"
 
@@ -355,13 +508,9 @@ class BronzeWriter:
             df.write.format("delta").mode("append").saveAsTable(full_table)
             return
 
-        # Step 2: Align each record to the table schema.
-        # For each field in the table schema, pull the value from the record
-        # (or None if missing). This guarantees every column is present and
-        # typed correctly — no all-None columns that confuse Spark inference.
-        # DateType fields must be python datetime.date objects (not strings).
-        from datetime import date as _date, datetime as _datetime
-
+        # Step 2: Align each record to the table schema with correct types.
+        # DateType requires python datetime.date (not string).
+        # All-None columns are preserved as None — schema enforces the type.
         aligned_records = []
         for record in records:
             aligned = {}
@@ -370,18 +519,14 @@ class BronzeWriter:
                 if val is None:
                     aligned[field.name] = None
                     continue
-
                 type_name = type(field.dataType).__name__
-
                 try:
                     if type_name == "DateType":
-                        # DateType requires python datetime.date
                         if isinstance(val, _date):
                             aligned[field.name] = val
                         else:
                             aligned[field.name] = _date.fromisoformat(str(val)[:10])
                     elif type_name == "TimestampType":
-                        # TimestampType requires python datetime
                         if isinstance(val, _datetime):
                             aligned[field.name] = val
                         else:
@@ -395,34 +540,38 @@ class BronzeWriter:
                     elif type_name == "StringType":
                         aligned[field.name] = str(val)
                     else:
-                        # Unknown type — pass through as-is
                         aligned[field.name] = val
                 except (ValueError, TypeError) as e:
                     logger.debug(
-                        f"Type cast failed for field {field.name} "
+                        f"Type cast failed for {field.name} "
                         f"(type={type_name}, val={val!r}): {e} — setting None"
                     )
                     aligned[field.name] = None
-
             aligned_records.append(aligned)
 
-        # Step 3: Create DataFrame with explicit schema
+        # Step 3: Create DataFrame with explicit schema + append
         df = self._spark.createDataFrame(aligned_records, schema=table_schema)
-
-        # Step 4: Append to Delta table
         df.write.format("delta").mode("append").saveAsTable(full_table)
         logger.debug(
             f"Appended {len(records)} records to {full_table} "
             f"using explicit schema ({len(table_schema.fields)} fields)"
         )
 
-    def get_local_records(self, table_name: str) -> List[dict]:
-        """Return all records in local store for a table (test helper)."""
-        return self._local_store.get(table_name, [])
+    def _spark_count_records(
+        self,
+        symbol: str,
+        interval: str,
+        table_name: str,
+    ) -> int:
+        """Count total Bronze records for a symbol + interval."""
+        full_table = f"{self._catalog}.{self._schema}.{table_name}"
+        try:
+            row = self._spark.sql(f"""
+                SELECT COUNT(*) AS cnt FROM {full_table}
+                WHERE symbol = '{symbol}' AND interval = '{interval}'
+            """).first()
+            return int(row["cnt"]) if row else 0
+        except Exception as e:
+            logger.warning(f"Could not count records in {full_table}: {e}")
+            return 0
 
-    def get_local_record_count(self, table_name: str) -> int:
-        return len(self.get_local_records(table_name))
-
-    def clear_local_store(self) -> None:
-        """Clear all local store data (test helper)."""
-        self._local_store.clear()
