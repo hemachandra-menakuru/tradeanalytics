@@ -76,7 +76,7 @@ class IngestionMode(str, Enum):
 class IngestionWatermark:
     """
     Tracks ingestion progress per symbol + interval.
-    Stored in handh_trade.bronze.ingestion_watermark Delta table.
+    Stored in tradeanalytics.bronze.ingestion_watermark Delta table.
 
     Tracks BOTH ends of the date range:
       earliest_date — how far back we have data (for backward extension)

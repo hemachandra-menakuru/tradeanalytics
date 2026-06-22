@@ -9,8 +9,8 @@ The watermark table tells the IngestionPlanner:
   - What date range do we already have? (earliest_date → latest_date)
   - Do we need to extend backwards? (earliest_date > requested start)
 
-Watermark table: handh_trade.bronze.ingestion_watermark_{stream}
-  e.g. handh_trade.bronze.ingestion_watermark_daily
+Watermark table: tradeanalytics.bronze.ingestion_watermark_{stream}
+  e.g. tradeanalytics.bronze.ingestion_watermark_daily
 
 Local mode: in-memory dict (for tests and local development)
 Spark mode: Delta table (Databricks)
@@ -54,7 +54,7 @@ class WatermarkManager:
         self,
         mode: str = "local",
         spark=None,
-        catalog: str = "handh_trade",
+        catalog: str = "tradeanalytics",
         schema: str = "bronze",
         watermark_table: str = "ingestion_watermark_daily",
     ):

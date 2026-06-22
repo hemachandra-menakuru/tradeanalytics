@@ -13,10 +13,10 @@
 |------|-------|
 | Project | TradeAnalytics — Signal-as-a-Service ML trading platform |
 | GitHub | `hemachandra-menakuru/tradeanalytics` (private) |
-| Claude Project | `handh_tradeanalytics` |
-| AWS Account | `311925399625` (handh_tradeanalytics), region `us-east-1` |
+| Claude Project | `tradeanalyticsanalytics` |
+| AWS Account | `311925399625` (tradeanalyticsanalytics), region `us-east-1` |
 | Databricks | `dbc-bf0075e6-07aa.cloud.databricks.com`, workspace `handh-dev` |
-| Unity Catalog | `tradeanalytics` (NOT `handh_trade` — this was corrected) |
+| Unity Catalog | `tradeanalytics` (NOT `tradeanalytics` — this was corrected) |
 | Bronze schema | `tradeanalytics.bronze` |
 | DABs profile | `handh-trade-aws` |
 | IBKR account | `U5498892`, gateway at `~/dev/tools/ibkr/clientportal.gw`, port `5055` |

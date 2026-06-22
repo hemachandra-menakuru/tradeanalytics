@@ -103,7 +103,7 @@ class BronzeWriter:
         self,
         mode: str = "local",
         spark=None,
-        catalog: str = "handh_trade",
+        catalog: str = "tradeanalytics",
         schema: str = "bronze",
     ):
         """

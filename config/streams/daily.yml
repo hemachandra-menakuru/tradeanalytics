@@ -1,7 +1,7 @@
 # TradeAnalytics — Daily Stream Configuration
 # Stream: 1d OHLCV data
 # Phase: 2 (ACTIVE)
-# Table: handh_trade.bronze.market_data_daily
+# Table: tradeanalytics.bronze.market_data_daily
 
 daily:
   enabled: true
