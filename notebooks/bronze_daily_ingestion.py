@@ -33,24 +33,15 @@ try:
     symbols_param    = dbutils.widgets.get("symbols").strip()
     dry_run_param    = dbutils.widgets.get("dry_run").strip().lower()
     as_of_date_param = dbutils.widgets.get("as_of_date").strip()
-    start_date_param = dbutils.widgets.get("start_date").strip()
-    end_date_param   = dbutils.widgets.get("end_date").strip()
 except Exception:
     symbols_param    = ""
     dry_run_param    = "false"
     as_of_date_param = ""
-    start_date_param = ""
-    end_date_param   = ""
 
 symbols    = [s.strip() for s in symbols_param.split(",") if s.strip()] or None
 dry_run    = dry_run_param == "true"
 as_of_date = date.fromisoformat(as_of_date_param) if as_of_date_param else None
-start_date = date.fromisoformat(start_date_param) if start_date_param else None
-end_date   = date.fromisoformat(end_date_param)   if end_date_param   else None
-logger.info(
-    f"Parameters: symbols={symbols}, dry_run={dry_run}, "
-    f"as_of_date={as_of_date}, start_date={start_date}, end_date={end_date}"
-)
+logger.info(f"Parameters: symbols={symbols}, dry_run={dry_run}, as_of_date={as_of_date}")
 
 # COMMAND ----------
 os.environ["IBKR_ACCOUNT_ID"] = dbutils.secrets.get("tradeanalytics", "IBKR_ACCOUNT_ID")
@@ -74,9 +65,11 @@ from src.ingestion.providers.ibkr_provider import IBKRProvider
 
 MarketDataFactory.register("ibkr",  IBKRProvider)
 MarketDataFactory.register("yahoo", YahooProvider)
-config._data["sources"]["primary"]  = "yahoo"
-config._data["sources"]["fallback"] = "yahoo"
-logger.info("Provider set to Yahoo for Databricks")
+logger.info(
+    f"Providers registered — "
+    f"primary={config.sources.primary}, "
+    f"fallback={config.sources.fallback}"
+)
 
 # COMMAND ----------
 from src.ingestion.jobs.bronze_ingestion_job import BronzeIngestionJob
@@ -91,8 +84,6 @@ logger.info(f"Provider: {job._provider.provider_name}")
 summary = job.run(
     symbols=symbols,
     as_of_date=as_of_date,
-    start_date=start_date,
-    end_date=end_date,
     dry_run=dry_run,
 )
 

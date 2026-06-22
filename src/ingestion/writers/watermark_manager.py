@@ -1,3 +1,4 @@
+
 """
 TradeAnalytics Watermark Manager
 ==================================
@@ -231,7 +232,35 @@ class WatermarkManager:
             f"{self._catalog}.{self._schema}.{self._watermark_table}"
         )
         wm_dict = watermark.to_dict()
-        df = self._spark.createDataFrame([wm_dict])
+        from pyspark.sql.types import (
+            StructType, StructField, StringType, LongType, DateType
+        )
+        # Explicit schema prevents CANNOT_DETERMINE_TYPE on None fields
+        wm_schema = StructType([
+            StructField("symbol",          StringType(), False),
+            StructField("interval",        StringType(), False),
+            StructField("earliest_date",   DateType(),   False),
+            StructField("latest_date",     DateType(),   False),
+            StructField("record_count",    LongType(),   True),
+            StructField("last_run_at",     StringType(), True),
+            StructField("last_batch_id",   StringType(), True),
+            StructField("last_mode",       StringType(), True),
+            StructField("last_run_status", StringType(), True),
+            StructField("error_message",   StringType(), True),
+        ])
+        from datetime import date as _date
+        # Ensure date fields are python datetime.date objects
+        wm_dict["earliest_date"] = (
+            _date.fromisoformat(str(wm_dict["earliest_date"])[:10])
+            if not isinstance(wm_dict["earliest_date"], _date)
+            else wm_dict["earliest_date"]
+        )
+        wm_dict["latest_date"] = (
+            _date.fromisoformat(str(wm_dict["latest_date"])[:10])
+            if not isinstance(wm_dict["latest_date"], _date)
+            else wm_dict["latest_date"]
+        )
+        df = self._spark.createDataFrame([wm_dict], schema=wm_schema)
 
         # Watermark uses MERGE (not append-only) — it tracks current state
         df.createOrReplaceTempView("watermark_update")
@@ -243,3 +272,4 @@ class WatermarkManager:
             WHEN MATCHED THEN UPDATE SET *
             WHEN NOT MATCHED THEN INSERT *
         """)
+

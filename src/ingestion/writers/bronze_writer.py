@@ -487,26 +487,56 @@ class BronzeWriter:
           - PySparkTypeError: FIELD_DATA_TYPE_UNACCEPTABLE (string→DateType)
 
         Strategy:
-          1. Read existing table schema from Delta
-          2. Align each record dict to that schema with correct Python types
+          1. Read existing table schema from Delta metadata (not data scan)
+          2. Align each record dict to schema with correct Python types
           3. Create DataFrame with explicit schema — no type inference
           4. Append to Delta table
         """
         from datetime import date as _date, datetime as _datetime
+        from pyspark.sql.types import (
+            StructType, StructField, StringType, DoubleType,
+            LongType, IntegerType, BooleanType, DateType, TimestampType
+        )
 
         full_table = f"{self._catalog}.{self._schema}.{table_name}"
 
-        # Step 1: Get existing table schema
+        # Step 1: Get existing table schema from Delta metadata.
+        # Use DESCRIBE to get schema even when table is empty —
+        # spark.table(table).schema fails on empty tables in some Spark versions.
         try:
             table_schema = self._spark.table(full_table).schema
+            if not table_schema.fields:
+                raise ValueError("Empty schema returned")
         except Exception as e:
             logger.warning(
                 f"Could not read schema from {full_table}: {e}. "
-                f"Falling back to schema inference."
+                f"Building schema from DESCRIBE."
             )
-            df = self._spark.createDataFrame(records)
-            df.write.format("delta").mode("append").saveAsTable(full_table)
-            return
+            try:
+                # Fallback: build schema from DESCRIBE TABLE
+                desc_df = self._spark.sql(f"DESCRIBE TABLE {full_table}")
+                type_map_str = {
+                    "string": StringType(), "double": DoubleType(),
+                    "bigint": LongType(), "int": IntegerType(),
+                    "boolean": BooleanType(), "date": DateType(),
+                    "timestamp": TimestampType(),
+                }
+                fields = []
+                for row in desc_df.collect():
+                    col_name = row["col_name"]
+                    col_type = row["data_type"].lower().strip()
+                    if col_name and not col_name.startswith("#"):
+                        spark_type = type_map_str.get(col_type, StringType())
+                        fields.append(StructField(col_name, spark_type, True))
+                table_schema = StructType(fields)
+                if not fields:
+                    raise ValueError("DESCRIBE returned no fields")
+            except Exception as e2:
+                logger.error(
+                    f"Cannot determine schema for {full_table}: {e2}. "
+                    f"Aborting write to prevent data corruption."
+                )
+                raise
 
         # Step 2: Align each record to the table schema with correct types.
         # DateType requires python datetime.date (not string).
@@ -522,15 +552,15 @@ class BronzeWriter:
                 type_name = type(field.dataType).__name__
                 try:
                     if type_name == "DateType":
-                        if isinstance(val, _date):
-                            aligned[field.name] = val
-                        else:
-                            aligned[field.name] = _date.fromisoformat(str(val)[:10])
+                        aligned[field.name] = (
+                            val if isinstance(val, _date)
+                            else _date.fromisoformat(str(val)[:10])
+                        )
                     elif type_name == "TimestampType":
-                        if isinstance(val, _datetime):
-                            aligned[field.name] = val
-                        else:
-                            aligned[field.name] = _datetime.fromisoformat(str(val))
+                        aligned[field.name] = (
+                            val if isinstance(val, _datetime)
+                            else _datetime.fromisoformat(str(val))
+                        )
                     elif type_name == "DoubleType":
                         aligned[field.name] = float(val)
                     elif type_name in ("LongType", "IntegerType"):
@@ -544,7 +574,7 @@ class BronzeWriter:
                 except (ValueError, TypeError) as e:
                     logger.debug(
                         f"Type cast failed for {field.name} "
-                        f"(type={type_name}, val={val!r}): {e} — setting None"
+                        f"(type={type_name}, val={val!r}): {e} — None"
                     )
                     aligned[field.name] = None
             aligned_records.append(aligned)
