@@ -186,6 +186,8 @@ class BronzeIngestionJob:
         self,
         symbols:     Optional[List[str]] = None,
         as_of_date:  Optional[date] = None,
+        start_date:  Optional[date] = None,
+        end_date:    Optional[date] = None,
         dry_run:     bool = False,
     ) -> JobRunSummary:
         """
@@ -194,6 +196,8 @@ class BronzeIngestionJob:
         Args:
             symbols:    Override active ticker list (None = all active)
             as_of_date: Override today's date (for testing/backfill)
+            start_date: Force explicit date range start (overrides planner)
+            end_date:   Force explicit date range end (overrides planner)
             dry_run:    Plan only — do not fetch or write (for validation)
 
         Returns:
@@ -247,6 +251,8 @@ class BronzeIngestionJob:
                     today=today,
                     dry_run=dry_run,
                     job_summary=summary,
+                    start_date_override=start_date,
+                    end_date_override=end_date,
                 )
                 if result is not None:
                     summary.add_result(result)
@@ -298,6 +304,8 @@ class BronzeIngestionJob:
         today: date,
         dry_run: bool,
         job_summary: JobRunSummary,
+        start_date_override: Optional[date] = None,
+        end_date_override:   Optional[date] = None,
     ) -> Optional[BronzeWriteResult]:
         """
         Process one ticker through the full pipeline.
@@ -317,6 +325,19 @@ class BronzeIngestionJob:
             as_of_date=today,
             ticker_history_start=ticker.effective_history_start,
         )
+
+        # Override plan date range if explicit start/end provided
+        # (used by smoke tests and ad-hoc backfills via notebook widgets)
+        if start_date_override is not None and end_date_override is not None:
+            logger.info(
+                f"[{symbol}] Date range override: "
+                f"{start_date_override} → {end_date_override} "
+                f"(was: {plan.mode.value} {plan.start_date} → {plan.end_date})"
+            )
+            plan.mode       = IngestionMode.EXPLICIT_DATE_RANGE
+            plan.start_date = start_date_override
+            plan.end_date   = end_date_override
+            plan.ingestion_type = IngestionMode.EXPLICIT_DATE_RANGE.ingestion_type
 
         logger.info(
             f"[{symbol}] Plan: {plan.mode.value} — "

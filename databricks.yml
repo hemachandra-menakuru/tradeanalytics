@@ -39,7 +39,9 @@ resources:
             base_parameters:
               symbols:    "SPY"           # smoke test — change to "" for production
               dry_run:    "false"
-              as_of_date: "2026-06-20"   # smoke test — change to "" for production
+              as_of_date: ""             # empty = today
+              start_date: "2026-06-16"  # smoke test: explicit 3-day window
+              end_date:   "2026-06-20"  # smoke test: Mon-Wed (Fri is holiday)
           job_cluster_key: bronze_job_cluster
           timeout_seconds: 3600
           retry_on_timeout: false
