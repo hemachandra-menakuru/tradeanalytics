@@ -15,3 +15,53 @@ targets:
       profile: handh-trade-aws
     variables:
       env: dev
+
+resources:
+  jobs:
+    bronze_daily_ingestion:
+      name: "[${var.env}] Bronze Daily Ingestion"
+      description: "Ingests daily OHLCV market data from IBKR into Bronze Delta tables"
+
+      schedule:
+        quartz_cron_expression: "0 0 19 * * ?"
+        timezone_id: "America/New_York"
+        pause_status: PAUSED
+
+      email_notifications:
+        on_failure:
+          - handh.stocks@gmail.com
+
+      tasks:
+        - task_key: bronze_daily_ingestion
+          description: "Run Bronze ingestion for daily stream"
+          notebook_task:
+            notebook_path: "notebooks/bronze_daily_ingestion.py"
+            base_parameters:
+              symbols:    "SPY"           # smoke test — change to "" for production
+              dry_run:    "false"
+              as_of_date: "2026-06-20"   # smoke test — change to "" for production
+          job_cluster_key: bronze_job_cluster
+          timeout_seconds: 3600
+          retry_on_timeout: false
+          max_retries: 0                  # no retries during smoke test
+
+      job_clusters:
+        - job_cluster_key: bronze_job_cluster
+          new_cluster:
+            spark_version: "15.4.x-scala2.12"
+            node_type_id: "m5.xlarge"
+            num_workers: 1
+            policy_id: "001B2429FBD0E8AD"
+            aws_attributes:
+              availability: SPOT_WITH_FALLBACK
+              first_on_demand: 1
+            spark_conf:
+              spark.databricks.delta.preview.enabled: "true"
+            spark_env_vars:
+              ENVIRONMENT: "${var.env}"
+      tags:
+        project:    tradeanalytics
+        layer:      bronze
+        stream:     daily
+        phase:      "2"
+        managed_by: dabs

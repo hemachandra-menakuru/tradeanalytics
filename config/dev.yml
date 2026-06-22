@@ -17,7 +17,7 @@ aws:
 
 databricks:
   workspace: https://dbc-bf0075e6-07aa.cloud.databricks.com
-  catalog: handh_trade
+  catalog: tradeanalytics
   schemas:
     bronze: bronze
     silver: silver
