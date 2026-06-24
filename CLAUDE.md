@@ -20,7 +20,7 @@
 | Bronze schema | `tradeanalytics.bronze` |
 | DABs profile | `handh-trade-aws` |
 | IBKR account | `U5498892`, gateway at `~/dev/tools/ibkr/clientportal.gw`, port `5055` |
-| Conda env | `tradeanalytics` (Python 3.11) |
+| Conda env | `tradeanalytics` (Python 3.11, `databricks-connect==15.4.25`) |
 | Repo path (local) | `/Users/hemachandra/projects/tradeanalytics` (shell alias: `~/pr/tradeanalytics`) |
 | Active branch | `feature/phase2-data-ingestion` |
 | Git pager | Disabled — `git config --global core.pager cat` (already set) |
@@ -83,7 +83,7 @@ Adding a new component = implement ABC + register (one line) + update YAML. Zero
 | Phase | Name | Status |
 |-------|------|--------|
 | 1 | Infrastructure | ✅ Complete |
-| 2 | Bronze Ingestion | ✅ Complete — smoke test passed, 2,636 SPY records in Delta |
+| 2 | Bronze Ingestion | ✅ Complete — IBKR smoke test passed 2026-06-25, source=ibkr confirmed |
 | 3 | Silver (Feature Engineering) | Not started |
 | 4 | Gold + Signal Platform | Not started |
 | 4b | Signal sharing (Telegram/API) | Not started |
@@ -93,9 +93,9 @@ Adding a new component = implement ABC + register (one line) + update YAML. Zero
 
 ### Phase 2 remaining tasks
 1. ✅ All code + infrastructure complete
-2. ✅ Smoke test passed — 2,636 SPY records (2016-01-04 → 2026-06-18)
-3. ⬜ Phase 2 docs: `TradeAnalytics_Phase2_Data_Ingestion_Guide.docx`
-4. ⬜ PR: merge `feature/phase2-data-ingestion` → main
+2. ✅ Smoke test passed — IBKR confirmed, source=ibkr, 29 SPY records (2026-05-13 → 2026-06-24)
+3. ✅ Phase 2 docs: `TradeAnalytics_Phase2_Data_Ingestion_Guide.docx` — created 2026-06-25
+4. ✅ PR: merge `feature/phase2-data-ingestion` → main
 
 ### Phase 3 teaching approach (locked)
 - **Step by step — explain every concept before writing code**
@@ -145,6 +145,7 @@ tradeanalytics/
 │       └── data_quality_rules.yml
 ├── notebooks/bronze_daily_ingestion.py     # Databricks entry point
 ├── databricks.yml                          # DABs bundle (job ID: 174217366433843)
+├── TradeAnalytics_Phase2_Data_Ingestion_Guide.docx  # Phase 2 operational guide
 └── tests/                                  # 249 tests passing
 ```
 
@@ -178,7 +179,7 @@ table_schema = self._spark.table(full_table).schema  # primary
 # is_amended(False), amendment_reason(None), supersedes_batch(None),
 # data_completeness_pct(computed), session_open(None), session_close(None),
 # ingested_by, fetch_attempt_count
-# data_completeness_pct=60 for IBKR (correct — IBKR supplies ~60% of optional fields)
+# data_completeness_pct=60-64 for IBKR (correct — IBKR supplies ~60-64% of optional fields)
 ```
 
 ### BronzeIngestionJob — key patterns
@@ -186,6 +187,19 @@ table_schema = self._spark.table(full_table).schema  # primary
 # stream_interval defined BEFORE ticker loop (prevents NameError in error handler)
 # run() accepts start_date/end_date override params
 # Passes plan.ingestion_type to validator.validate_batch()
+```
+
+### Local execution via Databricks Connect (IBKR ingestion path)
+```python
+# conda env has databricks-connect==15.4.25 (replaces standalone pyspark + delta-spark)
+# Tests still pass — BronzeWriter(mode="local") uses in-memory store, no Spark needed
+from databricks.connect import DatabricksSession
+spark = DatabricksSession.builder.remote(
+    host="https://dbc-bf0075e6-07aa.cloud.databricks.com",
+    token=TOKEN,          # from ~/.databrickscfg profile handh-trade-aws
+    cluster_id=CLUSTER_ID # interactive cluster, DBR 15.4
+).getOrCreate()
+# Python (incl. IBKR HTTP calls) runs on local Mac; Spark writes go to Unity Catalog
 ```
 
 ### Notebook — Cell 7 (provider registration)
@@ -217,20 +231,30 @@ smoke_test_params:
 
 ---
 
-## 7. Smoke Test Results (2026-06-22)
+## 7. Smoke Test Results
+
+### Run 1 — 2026-06-22 (Yahoo — stale cached notebook, invalid)
+Wrote 2,636 SPY records with `source=yahoo`. Tables were truncated 2026-06-25.
+
+### Run 2 — 2026-06-25 (IBKR — confirmed valid) ✅
 
 | Check | Result |
 |-------|--------|
-| Job succeeded | ✅ 10m 16s |
-| Records written | ✅ 2,636 SPY (2016-01-04 → 2026-06-18) |
+| source | ✅ `ibkr` (all 29 records) |
 | record_version | ✅ 1 |
 | ingestion_type | ✅ backfill |
 | data_quality_flag | ✅ false |
-| data_completeness_pct | ✅ 60 |
-| batch_id | ✅ populated |
+| data_completeness_pct | ✅ 64.0 |
+| batch_id | ✅ `batch_daily_20260624_232449` |
 | ingested_at | ✅ UTC timestamp |
 | ingested_by | ⚠️ NULL (see Known Issues) |
-| Delta lineage | ✅ 2 upstream, 2 downstream tables |
+| Date range | 2026-05-13 → 2026-06-24 (29 trading days) |
+| Records written | 29 |
+| Records rejected | 0 |
+| Execution | Local Databricks Connect (Python on Mac → Unity Catalog) |
+
+**Note on record count:** 29 records (not full 10yr history) because `_days_to_period()` in
+IBKRProvider maps the INITIAL_LOAD request to ~1 month. This is OQ-1 — pre-existing known issue.
 
 ---
 
@@ -254,10 +278,6 @@ short ranges to minimum IBKR period, or plan override code path not being hit.
 IBKR provider sets `ingested_by="ibkr_provider_v1"` on raw records but field arrives
 as NULL in Delta. `validator._enrich_record()` uses `enriched.get("ingested_by", None)`
 which should preserve the value. Investigate whether it's being overwritten somewhere.
-
-### ⚠️ Duplicate records from failed smoke test runs
-Multiple rows for some dates from repeated failed runs. Bronze is append-only by design.
-Silver ROW_NUMBER dedup handles this. Do not DELETE from Bronze.
 
 ### Phase 3 Technical Debt (fix during Phase 3)
 1. **BronzeRecord not instantiated** — records flow as dicts, all defaults bypassed.
@@ -290,7 +310,7 @@ config.daily.intervals             # ["1d"]
 
 | Table | Full Name | Records |
 |-------|-----------|---------|
-| Main bronze | `tradeanalytics.bronze.market_data_daily` | 2,636 SPY |
+| Main bronze | `tradeanalytics.bronze.market_data_daily` | 29 SPY (source=ibkr, 2026-05-13→2026-06-24) |
 | Rejected | `tradeanalytics.bronze.market_data_rejected` | 0 |
 | Watermark | `tradeanalytics.bronze.ingestion_watermark_daily` | 1 (SPY) |
 
