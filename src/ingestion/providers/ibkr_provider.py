@@ -1,3 +1,4 @@
+
 """
 TradeAnalytics IBKR Client Portal REST API Provider
 =====================================================
@@ -274,8 +275,22 @@ class IBKRProvider(MarketDataProvider):
             )
             result = self._get(endpoint)
 
-        except (ProviderAuthError, ProviderConnectionError):
-            raise
+        except ProviderAuthError as e:
+            # Gateway reachable but not authenticated — degrade gracefully.
+            # Caller (BronzeIngestionJob) checks health_check() before calling
+            # get_historical(), so this path means session expired mid-run.
+            logger.warning(
+                f"[{symbol}] IBKR not authenticated — returning empty. "
+                f"Login at https://localhost:5055. Error: {e}"
+            )
+            return []
+        except ProviderConnectionError as e:
+            # Gateway unreachable — degrade gracefully.
+            logger.warning(
+                f"[{symbol}] IBKR gateway unreachable — returning empty. "
+                f"Error: {e}"
+            )
+            return []
         except Exception as e:
             raise ProviderConnectionError(
                 f"IBKR historical fetch failed for {symbol}: {e}"
@@ -489,6 +504,8 @@ class IBKRProvider(MarketDataProvider):
                 "trade_count":     None,  # not in history endpoint
                 "vwap":            None,  # not in history endpoint
                 "prev_close":      None,  # not available in batch
+                "session_open":    None,  # not in history endpoint
+                "session_close":   None,  # not in history endpoint
 
                 # Pre/post market
                 "pre_market_high":    None,
@@ -537,3 +554,4 @@ class IBKRProvider(MarketDataProvider):
 # Self-register with factory
 from src.ingestion.factory.provider_factory import MarketDataFactory
 MarketDataFactory.register("ibkr", IBKRProvider)
+

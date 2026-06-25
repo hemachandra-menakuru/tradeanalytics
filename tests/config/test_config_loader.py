@@ -51,7 +51,7 @@ def test_aws_s3_buckets():
 
 def test_databricks_catalog():
     config = ConfigLoader.load(environment="dev", repo_root=REPO_ROOT)
-    assert config.databricks.catalog == "handh_trade"
+    assert config.databricks.catalog == "tradeanalytics"
 
 
 def test_databricks_schemas():

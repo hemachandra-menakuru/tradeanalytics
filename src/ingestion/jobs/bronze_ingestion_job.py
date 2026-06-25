@@ -1,3 +1,4 @@
+
 """
 TradeAnalytics Bronze Ingestion Job
 =====================================
@@ -185,6 +186,8 @@ class BronzeIngestionJob:
         self,
         symbols:     Optional[List[str]] = None,
         as_of_date:  Optional[date] = None,
+        start_date:  Optional[date] = None,
+        end_date:    Optional[date] = None,
         dry_run:     bool = False,
     ) -> JobRunSummary:
         """
@@ -193,6 +196,8 @@ class BronzeIngestionJob:
         Args:
             symbols:    Override active ticker list (None = all active)
             as_of_date: Override today's date (for testing/backfill)
+            start_date: Force explicit date range start (overrides planner)
+            end_date:   Force explicit date range end (overrides planner)
             dry_run:    Plan only — do not fetch or write (for validation)
 
         Returns:
@@ -233,6 +238,10 @@ class BronzeIngestionJob:
                 f"{self._provider.provider_name}"
             )
 
+        # interval is the primary interval for this stream — needed in
+        # error handler below where _process_ticker may not have run yet
+        stream_interval = self._stream_cfg.intervals[0]
+
         # Process each ticker
         for ticker in tickers:
             try:
@@ -242,6 +251,8 @@ class BronzeIngestionJob:
                     today=today,
                     dry_run=dry_run,
                     job_summary=summary,
+                    start_date_override=start_date,
+                    end_date_override=end_date,
                 )
                 if result is not None:
                     summary.add_result(result)
@@ -257,12 +268,12 @@ class BronzeIngestionJob:
                 # Update watermark with failure status
                 try:
                     wm = self._watermark_mgr.get_watermark(
-                        ticker.symbol, "1d"
+                        ticker.symbol, stream_interval
                     )
                     if wm is not None:
                         self._watermark_mgr.update_watermark(
                             symbol=ticker.symbol,
-                            interval="1d",
+                            interval=stream_interval,
                             earliest_date=wm.earliest_date,
                             latest_date=wm.latest_date,
                             record_count=wm.record_count,
@@ -293,13 +304,15 @@ class BronzeIngestionJob:
         today: date,
         dry_run: bool,
         job_summary: JobRunSummary,
+        start_date_override: Optional[date] = None,
+        end_date_override:   Optional[date] = None,
     ) -> Optional[BronzeWriteResult]:
         """
         Process one ticker through the full pipeline.
         Returns BronzeWriteResult or None if NO_OP.
         """
         symbol   = ticker.symbol
-        interval = self._stream_cfg.intervals[0]  # primary interval for stream
+        interval = self._stream_cfg.intervals[0]  # primary interval for stream — single source of truth
 
         # Step 1: Read watermark
         watermark = self._watermark_mgr.get_watermark(symbol, interval)
@@ -312,6 +325,19 @@ class BronzeIngestionJob:
             as_of_date=today,
             ticker_history_start=ticker.effective_history_start,
         )
+
+        # Override plan date range if explicit start/end provided
+        # (used by smoke tests and ad-hoc backfills via notebook widgets)
+        if start_date_override is not None and end_date_override is not None:
+            logger.info(
+                f"[{symbol}] Date range override: "
+                f"{start_date_override} → {end_date_override} "
+                f"(was: {plan.mode.value} {plan.start_date} → {plan.end_date})"
+            )
+            plan.mode       = IngestionMode.EXPLICIT_DATE_RANGE
+            plan.start_date = start_date_override
+            plan.end_date   = end_date_override
+            plan.ingestion_type = IngestionMode.EXPLICIT_DATE_RANGE.ingestion_type
 
         logger.info(
             f"[{symbol}] Plan: {plan.mode.value} — "
@@ -349,6 +375,7 @@ class BronzeIngestionJob:
             batch_id=batch_id,
             raw_records=raw_records,
             pipeline_version=self._pipeline_version,
+            ingestion_type=plan.ingestion_type,
         )
 
         logger.info(
@@ -366,7 +393,6 @@ class BronzeIngestionJob:
             clean_records=validation_summary.writable_records,
             rejected_records=validation_summary.rejected_records,
             stream_cfg=self._stream_cfg,
-            pipeline_version=self._pipeline_version,
         )
 
         # Step 7: Update watermark
@@ -389,10 +415,10 @@ class BronzeIngestionJob:
                     interval=interval,
                     earliest_date=min_date,
                     latest_date=max_date,
-                    record_count=(
-                        self._writer.get_local_record_count(
-                            self._stream_cfg.table
-                        ) if self._mode == "local" else 0
+                    record_count=self._writer.get_record_count(
+                        symbol=symbol,
+                        interval=interval,
+                        table_name=self._stream_cfg.table,
                     ),
                     batch_id=batch_id,
                     mode=plan.mode.value,
@@ -469,3 +495,4 @@ class BronzeIngestionJob:
         """Generate unique batch ID for this job run."""
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         return f"batch_{self._stream_name}_{timestamp}"
+

@@ -18,6 +18,31 @@ from src.ingestion.base.market_data_provider import (
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
+# ---------------------------------------------------------------------------
+# Live gateway guard — skip tests that require a running, authenticated session
+# ---------------------------------------------------------------------------
+def _gateway_is_authenticated() -> bool:
+    """Return True only if IBKR gateway is reachable AND authenticated."""
+    try:
+        import ssl, urllib.request, json
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        req = urllib.request.Request(
+            "https://localhost:5055/v1/api/iserver/auth/status"
+        )
+        req.add_header("User-Agent", "TradeAnalytics/test")
+        with urllib.request.urlopen(req, context=ctx, timeout=3) as resp:
+            data = json.loads(resp.read().decode())
+            return bool(data.get("authenticated", False))
+    except Exception:
+        return False
+
+requires_live_gateway = pytest.mark.skipif(
+    not _gateway_is_authenticated(),
+    reason="IBKR gateway not running or not authenticated — skipping live test",
+)
+
 
 @pytest.fixture(autouse=True)
 def reset_config():
@@ -109,12 +134,14 @@ def test_ibkr_supports_4h_interval(ibkr_provider):
     assert ibkr_provider.supports_interval("4h") == True
 
 
+@requires_live_gateway
 def test_ibkr_health_check_returns_bool(ibkr_provider):
     """IBKR health_check returns bool — True if gateway running, False if not."""
     result = ibkr_provider.health_check()
     assert isinstance(result, bool)
 
 
+@requires_live_gateway
 def test_ibkr_get_historical_returns_list(ibkr_provider):
     """IBKR get_historical returns a list (may be empty if gateway not running)."""
     result = ibkr_provider.get_historical(
@@ -123,6 +150,7 @@ def test_ibkr_get_historical_returns_list(ibkr_provider):
     assert isinstance(result, list)
 
 
+@requires_live_gateway
 def test_ibkr_get_latest_quote_returns_dict_or_none(ibkr_provider):
     """IBKR get_latest_quote returns dict if gateway running, None if not."""
     result = ibkr_provider.get_latest_quote("AAPL")

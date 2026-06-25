@@ -1,7 +1,7 @@
 # TradeAnalytics — Tick Stream Configuration
 # Stream: 1m, 5m OHLCV data
 # Phase: 5 (DISABLED — enable only when live trading infrastructure ready)
-# Table: handh_trade.bronze.market_data_tick
+# Table: tradeanalytics.bronze.market_data_tick
 
 tick:
   enabled: false

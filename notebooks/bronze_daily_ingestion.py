@@ -1,26 +1,21 @@
 # Databricks notebook source
 # TradeAnalytics — Bronze Daily Ingestion
-# =========================================
-# Entry point for the daily Bronze ingestion job.
-# Runs as a Databricks job on schedule: 7:00 PM Mon-Fri Eastern.
-#
-# Parameters (passed via Databricks job widgets):
-#   symbols:    comma-separated list or empty (all active)
-#   dry_run:    true/false (plan only, no writes)
-#   as_of_date: YYYY-MM-DD or empty (today)
-#
-# To run manually in Databricks notebook:
-#   dbutils.widgets.text("symbols", "")
-#   dbutils.widgets.text("dry_run", "false")
-#   dbutils.widgets.text("as_of_date", "")
 
 # COMMAND ----------
+# Install ALL dependencies first — before any other imports
+import subprocess
+result = subprocess.run(
+    ["pip", "install", "python-dotenv", "yfinance", "--quiet", "--no-warn-script-location"],
+    capture_output=True, text=True
+)
+print(result.stdout)
+print(result.stderr)
+print("✅ Dependencies installed")
 
-import sys
-import logging
+# COMMAND ----------
+import sys, os, logging
 from datetime import date
 
-# Set up logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -28,14 +23,17 @@ logging.basicConfig(
 logger = logging.getLogger("bronze_daily_ingestion")
 
 # COMMAND ----------
+bundle_path = "/Workspace/Users/handh.stocks@gmail.com/.bundle/tradeanalytics/dev/files"
+if bundle_path not in sys.path:
+    sys.path.insert(0, bundle_path)
+logger.info(f"Bundle path added: {bundle_path}")
 
-# Read job parameters
+# COMMAND ----------
 try:
-    symbols_param   = dbutils.widgets.get("symbols").strip()
-    dry_run_param   = dbutils.widgets.get("dry_run").strip().lower()
+    symbols_param    = dbutils.widgets.get("symbols").strip()
+    dry_run_param    = dbutils.widgets.get("dry_run").strip().lower()
     as_of_date_param = dbutils.widgets.get("as_of_date").strip()
 except Exception:
-    # Running locally or without widgets
     symbols_param    = ""
     dry_run_param    = "false"
     as_of_date_param = ""
@@ -43,37 +41,45 @@ except Exception:
 symbols    = [s.strip() for s in symbols_param.split(",") if s.strip()] or None
 dry_run    = dry_run_param == "true"
 as_of_date = date.fromisoformat(as_of_date_param) if as_of_date_param else None
-
-logger.info(
-    f"Job parameters: symbols={symbols}, dry_run={dry_run}, "
-    f"as_of_date={as_of_date}"
-)
+logger.info(f"Parameters: symbols={symbols}, dry_run={dry_run}, as_of_date={as_of_date}")
 
 # COMMAND ----------
+os.environ["IBKR_ACCOUNT_ID"] = dbutils.secrets.get("tradeanalytics", "IBKR_ACCOUNT_ID")
+logger.info("Secrets loaded")
 
-# Load config
+# COMMAND ----------
 from src.config.config_loader import ConfigLoader
-
-config = ConfigLoader.load(environment="dev")
+ConfigLoader.reset()
+config = ConfigLoader.load(environment=os.getenv("ENVIRONMENT", "dev"))
 logger.info(f"Config loaded: catalog={config.databricks.catalog}")
 
 # COMMAND ----------
-
-# Validate daily stream is enabled
 if not config.daily.enabled:
-    logger.warning("Daily stream is DISABLED in config — exiting")
+    logger.warning("Daily stream DISABLED — exiting")
     dbutils.notebook.exit("Stream disabled")
 
 # COMMAND ----------
+from src.ingestion.factory.provider_factory import MarketDataFactory
+from src.ingestion.providers.yahoo_provider import YahooProvider
+from src.ingestion.providers.ibkr_provider import IBKRProvider
 
-# Run ingestion
+MarketDataFactory.register("ibkr",  IBKRProvider)
+MarketDataFactory.register("yahoo", YahooProvider)
+logger.info(
+    f"Providers registered — "
+    f"primary={config.sources.primary}, "
+    f"fallback={config.sources.fallback}"
+)
+
+# COMMAND ----------
 from src.ingestion.jobs.bronze_ingestion_job import BronzeIngestionJob
 
 job = BronzeIngestionJob(
     config=config,
     stream_name="daily",
-    spark=spark,  # Databricks spark session
+    spark=spark,
 )
+logger.info(f"Provider: {job._provider.provider_name}")
 
 summary = job.run(
     symbols=symbols,
@@ -82,45 +88,30 @@ summary = job.run(
 )
 
 # COMMAND ----------
-
-# Log summary
-logger.info(f"Job completed: {summary}")
-logger.info(f"Total records written: {summary.total_records_written}")
-logger.info(f"Total records rejected: {summary.total_records_rejected}")
-logger.info(f"Symbols skipped (no-op): {len(summary.skipped)}")
-
+logger.info(
+    f"Written={summary.total_records_written}, "
+    f"Rejected={summary.total_records_rejected}, "
+    f"Skipped={len(summary.skipped)}, "
+    f"Failed={len(summary.failed)}"
+)
 if summary.failed:
-    logger.error(f"Failed symbols: {summary.failed}")
     for sym, err in summary.errors.items():
-        logger.error(f"  {sym}: {err}")
+        logger.error(f"FAILED {sym}: {err}")
 
 # COMMAND ----------
-
-# Display summary table (Databricks display)
 import pandas as pd
-
-results_data = [
-    {
+if summary.results:
+    display(pd.DataFrame([{
         "symbol":          r.symbol,
         "records_written": r.records_written,
         "records_amended": r.records_amended,
         "records_skipped": r.records_skipped,
         "rejected":        r.rejected_written,
         "duration_ms":     r.duration_ms,
-    }
-    for r in summary.results
-]
-
-if results_data:
-    display(pd.DataFrame(results_data))
+    } for r in summary.results]))
 
 # COMMAND ----------
-
-# Exit with status
 if summary.failed:
-    raise Exception(
-        f"Job completed with {len(summary.failed)} failures: "
-        f"{summary.failed}"
-    )
+    raise Exception(f"Job failed for: {summary.failed}")
 
-logger.info("Bronze daily ingestion completed successfully")
+logger.info("✅ Bronze daily ingestion completed successfully")

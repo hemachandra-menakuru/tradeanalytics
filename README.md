@@ -10,7 +10,7 @@ End-to-end ML-driven algorithmic trading pipeline built on AWS and Databricks.
 - **Execution:** Anthropic LLM agent · IBKR TWS API
 
 ## AWS Account
-- Account: `handh_tradeanalytics` (311925399625)
+- Account: `tradeanalyticsanalytics` (311925399625)
 - Region: `us-east-1`
 - Resource prefix: `handh-trade`
 
@@ -28,7 +28,7 @@ End-to-end ML-driven algorithmic trading pipeline built on AWS and Databricks.
 - **Execution:** Anthropic LLM agent · IBKR TWS API
 
 ## AWS Account
-- Account: `handh_tradeanalytics` (311925399625)
+- Account: `tradeanalyticsanalytics` (311925399625)
 - Region: `us-east-1`
 - Resource prefix: `handh-trade`
 

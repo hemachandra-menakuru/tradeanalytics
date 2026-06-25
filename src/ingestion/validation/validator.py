@@ -1,3 +1,4 @@
+
 """
 TradeAnalytics Data Quality Validator
 ======================================
@@ -137,9 +138,19 @@ class DataQualityValidator:
         batch_id: str,
         raw_records: List[dict],
         pipeline_version: str = "unknown",
+        ingestion_type: str = "scheduled",
     ) -> ValidationSummary:
         """
         Validate a batch of raw OHLCV records for one symbol + interval.
+
+        Args:
+            symbol:           Ticker symbol
+            interval:         Data interval
+            batch_id:         Unique batch identifier (stamped on every record)
+            raw_records:      Raw dicts from provider
+            pipeline_version: Git SHA (stamped on every record)
+            ingestion_type:   From IngestionMode.ingestion_type — "backfill" |
+                              "scheduled" | "amendment" (stamped on every record)
         """
         summary = ValidationSummary(
             symbol=symbol,
@@ -155,6 +166,7 @@ class DataQualityValidator:
                 interval=interval,
                 batch_id=batch_id,
                 pipeline_version=pipeline_version,
+                ingestion_type=ingestion_type,
                 summary=summary,
             )
 
@@ -177,6 +189,7 @@ class DataQualityValidator:
         interval: str,
         batch_id: str,
         pipeline_version: str,
+        ingestion_type: str,
         summary: ValidationSummary,
     ) -> None:
         fired_results = self._engine.apply(record)
@@ -204,7 +217,10 @@ class DataQualityValidator:
                     ValidationOutcome.REJECTED.value, r.rule_name, r.message or "")
 
         elif flags:
-            enriched = self._enrich_record(record, [f.rule_name for f in flags], True)
+            enriched = self._enrich_record(
+                record, [f.rule_name for f in flags], True,
+                batch_id, pipeline_version, ingestion_type,
+            )
             summary.flagged_records.append(enriched)
             summary.total_flagged += 1
             for f in flags:
@@ -216,15 +232,83 @@ class DataQualityValidator:
 
         else:
             summary.clean_records.append(
-                self._enrich_record(record, [], False)
+                self._enrich_record(
+                    record, [], False,
+                    batch_id, pipeline_version, ingestion_type,
+                )
             )
             summary.total_passed += 1
 
-    def _enrich_record(self, record, flag_reasons, flag):
+    def _enrich_record(
+        self,
+        record: dict,
+        flag_reasons: list,
+        flag: bool,
+        batch_id: str = "unknown",
+        pipeline_version: str = "unknown",
+        ingestion_type: str = "scheduled",
+    ) -> dict:
+        """
+        Enrich a validated record with all audit and pipeline fields.
+
+        This is the ONLY place audit fields are stamped onto records.
+        Records flow as plain dicts through the pipeline — BronzeRecord
+        is not instantiated during ingestion. All fields that BronzeRecord
+        __post_init__ would set must be explicitly stamped here.
+
+        Fields stamped:
+          Group 7 (Data Quality): data_quality_flag, data_quality_reasons,
+                                  data_completeness_pct
+          Group 8 (Pipeline Audit): batch_id, pipeline_version, record_version,
+                                    ingested_at, ingestion_type, is_amended,
+                                    amendment_reason, supersedes_batch
+          Group 4 (Session): session_open, session_close (None if provider
+                              cannot supply)
+        """
         enriched = record.copy()
+
+        # ── Group 7: Data Quality ─────────────────────────────────────────
         enriched["data_quality_flag"]    = flag
         enriched["data_quality_reasons"] = json.dumps(flag_reasons)
+        enriched["data_completeness_pct"] = self._compute_completeness(enriched)
+
+        # ── Group 8: Pipeline Audit ───────────────────────────────────────
+        enriched["batch_id"]          = batch_id
+        enriched["pipeline_version"]  = pipeline_version
+        enriched["record_version"]    = enriched.get("record_version", 1)
+        enriched["ingested_at"]       = datetime.now(timezone.utc).isoformat()
+        enriched["ingestion_type"]    = ingestion_type
+        enriched["is_amended"]        = enriched.get("is_amended", False)
+        enriched["amendment_reason"]  = enriched.get("amendment_reason", None)
+        enriched["supersedes_batch"]  = enriched.get("supersedes_batch", None)
+        enriched["ingested_by"]       = enriched.get("ingested_by", None)
+        enriched["fetch_attempt_count"] = enriched.get("fetch_attempt_count", 1)
+
+        # ── Group 4: Session Context (provider may not supply) ────────────
+        enriched.setdefault("session_open",  None)
+        enriched.setdefault("session_close", None)
+
         return enriched
+
+    def _compute_completeness(self, record: dict) -> float:
+        """
+        Compute data completeness score (0–100).
+        Core fields weighted 80%, optional fields 20%.
+        Mirrors BronzeRecord.compute_completeness() logic.
+        """
+        core_fields = [
+            "open", "high", "low", "close", "volume",
+            "adj_close", "prev_close", "vwap",
+        ]
+        optional_fields = [
+            "trade_count", "pre_market_volume", "post_market_volume",
+            "shares_outstanding", "exchange",
+        ]
+        core_present     = sum(1 for f in core_fields if record.get(f) is not None)
+        optional_present = sum(1 for f in optional_fields if record.get(f) is not None)
+        core_score       = (core_present / len(core_fields)) * 80
+        optional_score   = (optional_present / len(optional_fields)) * 20
+        return round(core_score + optional_score, 1)
 
     def _build_rejected_record(self, record, rule_name, reason, batch_id, pipeline_version):
         return {
@@ -283,3 +367,4 @@ class DataQualityValidator:
             logger.warning(msg)
             summary.add_audit_entry(str(gap_start), "alert",
                 "max_consecutive_missing_days", msg)
+
