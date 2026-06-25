@@ -35,7 +35,7 @@ resources:
         - task_key: bronze_daily_ingestion
           description: "Run Bronze ingestion for daily stream"
           notebook_task:
-            notebook_path: "notebooks/bronze_daily_ingestion.py"
+            notebook_path: "notebooks/bronze/bronze_daily_ingestion.py"
             base_parameters:
               symbols:    "SPY"           # smoke test — 1 symbol only
               dry_run:    "false"
