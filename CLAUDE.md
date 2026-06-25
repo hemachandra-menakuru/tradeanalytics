@@ -22,7 +22,7 @@
 | IBKR account | `U5498892`, gateway at `~/dev/tools/ibkr/clientportal.gw`, port `5055` |
 | Conda env | `tradeanalytics` (Python 3.11, `databricks-connect==15.4.25`) |
 | Repo path (local) | `/Users/hemachandra/projects/tradeanalytics` (shell alias: `~/pr/tradeanalytics`) |
-| Active branch | `feature/phase2-data-ingestion` |
+| Active branch | `main` (Phase 2 merged 2026-06-25 via PR #6) |
 | Git pager | Disabled — `git config --global core.pager cat` (already set) |
 
 ---
@@ -83,19 +83,13 @@ Adding a new component = implement ABC + register (one line) + update YAML. Zero
 | Phase | Name | Status |
 |-------|------|--------|
 | 1 | Infrastructure | ✅ Complete |
-| 2 | Bronze Ingestion | ✅ Complete — IBKR smoke test passed 2026-06-25, source=ibkr confirmed |
+| 2 | Bronze Ingestion | ✅ Merged to main — PR #6, 2026-06-25. IBKR smoke test passed, source=ibkr confirmed |
 | 3 | Silver (Feature Engineering) | Not started |
 | 4 | Gold + Signal Platform | Not started |
 | 4b | Signal sharing (Telegram/API) | Not started |
 | 5a | HC's execution bot | Not started |
 | 5b | Friends' execution bots | Not started |
 | 6 | Monetisation | Not started (legal review required first) |
-
-### Phase 2 remaining tasks
-1. ✅ All code + infrastructure complete
-2. ✅ Smoke test passed — IBKR confirmed, source=ibkr, 29 SPY records (2026-05-13 → 2026-06-24)
-3. ✅ Phase 2 docs: `TradeAnalytics_Phase2_Data_Ingestion_Guide.docx` — created 2026-06-25
-4. ✅ PR: merge `feature/phase2-data-ingestion` → main
 
 ### Phase 3 teaching approach (locked)
 - **Step by step — explain every concept before writing code**
