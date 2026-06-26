@@ -21,25 +21,20 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Cell 0 — Install dependencies
-# MAGIC
-# MAGIC `pyyaml` is required by `ConfigLoader` to read YAML config files.
-# MAGIC `%pip install` restarts the Python kernel automatically — this cell must run first.
-
-# COMMAND ----------
-
-# MAGIC %pip install pyyaml openpyxl requests --quiet
-
-# COMMAND ----------
-
-# MAGIC %md
 # MAGIC ## Cell 1 — Widgets
+# MAGIC
+# MAGIC This notebook is self-contained — no ConfigLoader, no external imports.
+# MAGIC All configuration comes from widgets so there are zero package dependencies.
 
 # COMMAND ----------
 
+dbutils.widgets.text(   "catalog", "tradeanalytics", "Unity Catalog name")
 dbutils.widgets.dropdown("dry_run", "true", ["true", "false"], "Dry Run (true = print SQL only)")
 
+CATALOG = dbutils.widgets.get("catalog")
 dry_run = dbutils.widgets.get("dry_run") == "true"
+
+print(f"catalog={CATALOG}")
 print(f"dry_run={dry_run}")
 if dry_run:
     print("DRY RUN MODE — SQL will be printed but not executed")
@@ -52,19 +47,9 @@ if dry_run:
 # COMMAND ----------
 
 import logging
-import sys
-import os
-
-# Add repo root to path so src.* imports work
-sys.path.insert(0, "/Workspace/Repos/hemachandra-menakuru/tradeanalytics")
-
-from src.shared.config.config_loader import ConfigLoader
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("schema_setup")
-
-config  = ConfigLoader.load()
-CATALOG = config.databricks.catalog   # "tradeanalytics"
 
 logger.info(f"Catalog: {CATALOG}")
 logger.info(f"Spark version: {spark.version}")
