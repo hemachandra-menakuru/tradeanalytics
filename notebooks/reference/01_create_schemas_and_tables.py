@@ -21,6 +21,18 @@
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Cell 0 — Install dependencies
+# MAGIC
+# MAGIC `pyyaml` is required by `ConfigLoader` to read YAML config files.
+# MAGIC `%pip install` restarts the Python kernel automatically — this cell must run first.
+
+# COMMAND ----------
+
+# MAGIC %pip install pyyaml openpyxl requests --quiet
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Cell 1 — Widgets
 
 # COMMAND ----------
