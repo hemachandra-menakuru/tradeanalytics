@@ -6,6 +6,7 @@
 # Run this once before the universe sync job runs for the first time.
 
 # COMMAND ----------
+
 # MAGIC %md
 # MAGIC ## Step 1 — Create Schemas
 
@@ -16,6 +17,7 @@ spark.sql("CREATE SCHEMA IF NOT EXISTS tradeanalytics.control")
 print("✓ Schemas ready: tradeanalytics.reference, tradeanalytics.control")
 
 # COMMAND ----------
+
 # MAGIC %md
 # MAGIC ## Step 2 — reference.instrument
 # MAGIC Permanent master record for every financial instrument we know about.
@@ -23,6 +25,7 @@ print("✓ Schemas ready: tradeanalytics.reference, tradeanalytics.control")
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 5
 spark.sql("""
 CREATE TABLE IF NOT EXISTS tradeanalytics.reference.instrument (
     instrument_id   BIGINT        GENERATED ALWAYS AS IDENTITY,
@@ -39,13 +42,14 @@ CREATE TABLE IF NOT EXISTS tradeanalytics.reference.instrument (
 USING DELTA
 COMMENT 'Permanent master record per financial instrument. Never deleted.'
 TBLPROPERTIES (
-    'delta.enableChangeDataFeed'        = 'true',
+    'delta.enableChangeDataFeed' = 'true',
     'delta.feature.allowColumnDefaults' = 'supported'
 )
 """)
 print("✓ reference.instrument")
 
 # COMMAND ----------
+
 # MAGIC %md
 # MAGIC ## Step 3 — reference.instrument_listing
 # MAGIC Symbol + exchange per instrument. SCD Type 2 — history preserved when
@@ -53,6 +57,7 @@ print("✓ reference.instrument")
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 7
 spark.sql("""
 CREATE TABLE IF NOT EXISTS tradeanalytics.reference.instrument_listing (
     listing_id      BIGINT        GENERATED ALWAYS AS IDENTITY,
@@ -77,13 +82,14 @@ CREATE TABLE IF NOT EXISTS tradeanalytics.reference.instrument_listing (
 USING DELTA
 COMMENT 'Symbol and exchange per instrument. SCD Type 2 — preserves symbol rename history.'
 TBLPROPERTIES (
-    'delta.enableChangeDataFeed'        = 'true',
+    'delta.enableChangeDataFeed' = 'true',
     'delta.feature.allowColumnDefaults' = 'supported'
 )
 """)
 print("✓ reference.instrument_listing")
 
 # COMMAND ----------
+
 # MAGIC %md
 # MAGIC ## Step 4 — reference.universe_membership
 # MAGIC Which instruments belong to which index universe (SP500, NDX100, RUSSELL2000).
@@ -111,14 +117,15 @@ CREATE TABLE IF NOT EXISTS tradeanalytics.reference.universe_membership (
 USING DELTA
 COMMENT 'Index universe membership per instrument. SP500, NDX100, RUSSELL2000, ETF_CURATED.'
 PARTITIONED BY (universe_code)
-TBLPROPERTIES (
-    'delta.enableChangeDataFeed'        = 'true',
-    'delta.feature.allowColumnDefaults' = 'supported'
+TBLPROPERTIES (    'delta.feature.allowColumnDefaults' = 'supported',
+
+    'delta.enableChangeDataFeed' = 'true'
 )
 """)
 print("✓ reference.universe_membership")
 
 # COMMAND ----------
+
 # MAGIC %md
 # MAGIC ## Step 5 — reference.instrument_feed_config
 # MAGIC DESIRED STATE — controls what the ingestion job fetches.
@@ -126,6 +133,7 @@ print("✓ reference.universe_membership")
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 11
 spark.sql("""
 CREATE TABLE IF NOT EXISTS tradeanalytics.reference.instrument_feed_config (
     config_id           BIGINT      GENERATED ALWAYS AS IDENTITY,
@@ -149,13 +157,14 @@ CREATE TABLE IF NOT EXISTS tradeanalytics.reference.instrument_feed_config (
 USING DELTA
 COMMENT 'Desired ingestion state per instrument. is_active=false = known but not ingesting.'
 TBLPROPERTIES (
-    'delta.enableChangeDataFeed'        = 'true',
+    'delta.enableChangeDataFeed' = 'true',
     'delta.feature.allowColumnDefaults' = 'supported'
 )
 """)
 print("✓ reference.instrument_feed_config")
 
 # COMMAND ----------
+
 # MAGIC %md
 # MAGIC ## Summary
 
