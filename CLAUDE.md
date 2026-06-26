@@ -84,7 +84,7 @@ Adding a new component = implement ABC + register (one line) + update YAML. Zero
 |-------|------|--------|
 | 1 | Infrastructure | ✅ Complete |
 | 2 | Bronze Ingestion | ✅ Merged to main — PR #6, 2026-06-25. IBKR smoke test passed, source=ibkr confirmed |
-| 2.5 | Pre-Phase 3 Restructure | 🔄 In progress — branch `feature/phase3-restructure`. Folder layout done, table architecture designed, code not yet written |
+| 2.5 | Pre-Phase 3 Restructure | 🔄 In progress — branch `feature/phase3-restructure`. Folder restructure done, table architecture designed, codebase review + 14 fixes applied (2026-06-26). Reference/control Delta tables not yet built. |
 | 3 | Silver (Feature Engineering) | Not started — blocked on Phase 2.5 completion |
 | 4 | Gold + Signal Platform | Not started |
 | 4b | Signal sharing (Telegram/API) | Not started |
@@ -112,37 +112,49 @@ tradeanalytics/
 │   ├── sources.yml              # provider settings (IBKR base_url=https://localhost:5055/v1/api)
 │   ├── risk.yml
 │   ├── logging.yml
+│   ├── quality/
+│   │   └── data_quality_rules.yml  # moved here from src/reference/seed/ (canonical location)
 │   └── streams/
 │       ├── daily.yml            # Phase 2, active
 │       ├── intraday.yml         # Phase 3, disabled
 │       └── tick.yml             # Phase 5, disabled
 ├── src/
 │   ├── shared/
-│   │   └── config/config_loader.py         # moved from src/config/ — import: src.shared.config.config_loader
-│   ├── bronze/                             # renamed from src/ingestion/
-│   │   ├── base/market_data_provider.py    # MarketDataProvider ABC
-│   │   ├── factory/provider_factory.py     # MarketDataFactory (registry)
+│   │   ├── config/config_loader.py         # import: src.shared.config.config_loader
+│   │   ├── base/
+│   │   │   ├── data_provider.py            # HistoricalDataProvider, RealtimeProvider, OptionsProvider ABCs (AR-1 ✅)
+│   │   │   ├── watermark_store.py          # WatermarkStore ABC (AR-4 ✅)
+│   │   │   ├── universe_reader.py          # UniverseReader + InstrumentInfo (AR-3 ✅)
+│   │   │   └── trading_calendar.py         # TradingCalendar ABC (AR-2 ✅)
+│   │   ├── calendar/
+│   │   │   └── us_equity_calendar.py       # US holiday calendar (AR-2 ✅)
+│   │   └── models/
+│   │       └── ohlcv_record.py             # OHLCVRecord TypedDict — enforced provider contract (AR-8 ✅)
+│   ├── bronze/
+│   │   ├── base/market_data_provider.py    # MarketDataProvider — composite ABC (inherits all 3 shared ABCs)
+│   │   ├── factory/provider_factory.py     # MarketDataFactory — registry base: HistoricalDataProvider
 │   │   ├── jobs/bronze_ingestion_job.py    # BronzeIngestionJob + JobRunSummary
 │   │   ├── models/
 │   │   │   ├── bronze_record.py            # BronzeRecord (59 fields, 8 groups)
 │   │   │   ├── ingestion_mode.py           # IngestionMode, FetchPlan, IngestionWatermark
 │   │   │   └── ingestion_planner.py        # IngestionPlanner (8 modes)
 │   │   ├── providers/
-│   │   │   ├── ibkr_provider.py            # IBKRProvider (primary, live-verified)
+│   │   │   ├── ibkr_provider.py            # IBKRProvider (primary, live-verified; conid cache persisted)
 │   │   │   └── yahoo_provider.py           # YahooProvider (unit test fallback only)
 │   │   ├── validation/
 │   │   │   ├── models.py
 │   │   │   ├── rule_engine.py              # RuleEngine (18 rules from YAML)
-│   │   │   └── validator.py               # DataQualityValidator
+│   │   │   └── validator.py               # DataQualityValidator (provider_nullable_fields wired)
 │   │   └── writers/
-│   │       ├── bronze_writer.py            # BronzeWriter (bulk pre-fetch, explicit schema)
+│   │       ├── bronze_writer.py            # BronzeWriter (Spark JOIN dedup, no stream_cfg param)
 │   │       └── watermark_manager.py        # WatermarkManager — to move to src/control/ in Phase 2.5
 │   ├── reference/
-│   │   ├── managers/ticker_reader.py       # reads from seed CSV (to be replaced by Delta table manager)
-│   │   └── seed/
-│   │       ├── tickers.csv                 # bootstrap seed only — NOT source of truth in production
-│   │       ├── strategies.csv
-│   │       └── data_quality_rules.yml
+│   │   ├── managers/ticker_reader.py       # reads from seed CSV (replace with Delta in Phase 2.5)
+│   │   ├── seed/
+│   │   │   ├── tickers.csv                 # bootstrap seed only — NOT source of truth in production
+│   │   │   ├── strategies.csv
+│   │   │   └── data_quality_rules.yml      # kept for backward compat — canonical copy in config/quality/
+│   │   └── sources/                        # reference data clients (NASDAQ FTP, OpenFIGI, etc.)
 │   ├── control/                            # Phase 2.5 — watermark manager moves here
 │   ├── silver/                             # Phase 3 placeholders
 │   ├── gold/                               # Phase 4 placeholders
@@ -152,11 +164,16 @@ tradeanalytics/
 ├── notebooks/
 │   └── bronze/bronze_daily_ingestion.py   # Databricks entry point (path updated in databricks.yml)
 ├── databricks.yml                          # DABs bundle (job ID: 174217366433843)
+├── pyproject.toml                          # pytest config — markers: unit/integration/smoke
+├── requirements.txt                        # Phase 1-3 deps only
+├── requirements-phase4.txt                 # API/signal publishing deps (fastapi, flask, etc.)
+├── requirements-phase5.txt                 # Execution deps (alembic, SQLAlchemy, docker)
 ├── TradeAnalytics_Phase2_Data_Ingestion_Guide.docx
 └── tests/
-    ├── bronze/                             # renamed from tests/ingestion/
+    ├── conftest.py                         # auto-applies @unit marker to unmarked tests
+    ├── bronze/
     ├── reference/managers/
-    └── shared/config/                      # renamed from tests/config/
+    └── shared/config/
 ```
 
 **Import paths after restructure:**
@@ -170,14 +187,21 @@ tradeanalytics/
 
 ### BronzeWriter — critical Spark patterns
 ```python
+# write_batch() signature (changed 2026-06-26):
+#   main_table: str, rejected_table: str  ← explicit strings, not stream_cfg object
+#   (storage layer must not know about config structure — AR-5 ✅)
+writer.write_batch(
+    symbol=symbol, interval=interval, batch_id=batch_id,
+    clean_records=..., rejected_records=...,
+    main_table=self._stream_cfg.table,
+    rejected_table=self._stream_cfg.rejected_table,
+)
+
+# _spark_bulk_fetch() — Spark DataFrame JOIN, not f-string IN-clause
+# SQL injection fix: build keys_df via createDataFrame(), join with table_df
 # _spark_append() — reads Delta schema FIRST, then aligns types
-table_schema = self._spark.table(full_table).schema  # primary
-# Fallback: DESCRIBE TABLE if schema empty (empty table edge case)
 # Type alignment: DateType→datetime.date, Double→float, Long/Int→int, Bool→bool
 # Prevents: CANNOT_DETERMINE_TYPE + FIELD_DATA_TYPE_UNACCEPTABLE
-
-# _bulk_classify() — ONE query per write_batch() call
-# _spark_bulk_fetch() — ROW_NUMBER window in single SQL
 # get_record_count() — real count for watermark (not 0)
 ```
 
@@ -187,14 +211,21 @@ table_schema = self._spark.table(full_table).schema  # primary
 # Converts earliest_date/latest_date strings → datetime.date before createDataFrame()
 ```
 
-### DataQualityValidator — audit field stamping
+### DataQualityValidator — audit field stamping + nullable fields
 ```python
+# Create with provider_nullable_fields wired (2026-06-26):
+validator = DataQualityValidator.for_stream(config, "daily")
+# Reads daily.yml → validation.provider_nullable_fields
+# Those fields excluded from data_completeness_pct denominator
+
 # _enrich_record() stamps ALL audit fields:
 # batch_id, pipeline_version, record_version(=1), ingested_at(UTC), ingestion_type,
 # is_amended(False), amendment_reason(None), supersedes_batch(None),
 # data_completeness_pct(computed), session_open(None), session_close(None),
 # ingested_by, fetch_attempt_count
 # data_completeness_pct=60-64 for IBKR (correct — IBKR supplies ~60-64% of optional fields)
+
+# Rules file canonical location: config/quality/data_quality_rules.yml
 ```
 
 ### BronzeIngestionJob — key patterns
@@ -202,6 +233,30 @@ table_schema = self._spark.table(full_table).schema  # primary
 # stream_interval defined BEFORE ticker loop (prevents NameError in error handler)
 # run() accepts start_date/end_date override params
 # Passes plan.ingestion_type to validator.validate_batch()
+# _update_watermark_after_write() extracted as helper (2026-06-26)
+
+# pipeline_version (2026-06-26):
+# Reads PIPELINE_VERSION env var first (set by DABs via databricks.yml pipeline_version var)
+# Falls back to git SHA for local development
+# Deploy with: databricks bundle deploy --var "pipeline_version=$(git rev-parse --short HEAD)"
+```
+
+### ISP provider ABCs (added 2026-06-26)
+```python
+# src/shared/base/data_provider.py — three focused ABCs:
+#   HistoricalDataProvider: get_historical, health_check, provider_name, supported_intervals
+#   RealtimeProvider:        get_latest_quote, is_market_open
+#   OptionsProvider:         get_options_chain
+# MarketDataProvider (src/bronze/base/) inherits all 3 — backward compat composite
+# MarketDataFactory registry type: HistoricalDataProvider (not MarketDataProvider)
+# Future providers: inherit only the interfaces they actually support
+```
+
+### IBKRProvider — conid cache (updated 2026-06-26)
+```python
+# Persisted to ~/.tradeanalytics/ibkr_conid_cache.json
+# Loaded on __init__, saved after each new lookup
+# Survives job restarts — avoids repeated contract searches across runs
 ```
 
 ### Local execution via Databricks Connect (IBKR ingestion path)
@@ -381,32 +436,32 @@ Full review doc: `TradeAnalytics — ML Trading Pipeline/Architecture_Review_202
 
 | # | Issue | Fix | Priority | Status |
 |---|---|---|---|---|
-| AR-1 | `MarketDataProvider` ABC forces all providers to implement options + realtime even if unsupported (ISP violation) | Split into `HistoricalDataProvider`, `RealTimeProvider`, `OptionsProvider` ABCs | Phase 2.5 | ⬜ Not started |
+| AR-1 | `MarketDataProvider` ABC forces all providers to implement options + realtime even if unsupported (ISP violation) | Split into `HistoricalDataProvider`, `RealtimeProvider`, `OptionsProvider` ABCs | Phase 2.5 | ✅ Done (2026-06-26) |
 | AR-2 | Hardcoded US holiday calendar (150 lines) in `ingestion_planner.py` — breaks for any non-US market or crypto | `TradingCalendar` ABC + `USEquityCalendar` impl, inject into `IngestionPlanner` | Phase 2.5 | ✅ Done |
 | AR-3 | No ABC behind `TickerReader` — Phase 2.5 CSV→Delta migration requires changing `BronzeIngestionJob` imports | `UniverseReader` ABC + `InstrumentInfo` model; `TickerReader` implements it | Phase 2.5 | ✅ Done |
-| AR-4 | No ABC behind `WatermarkManager` — migration to `control` schema requires changing call sites | `WatermarkStore` ABC in `src/shared/base/`; both implementations implement it | Phase 2.5 | ⬜ Not started |
-| AR-5 | `BronzeWriter.write_batch()` receives `stream_cfg` config object — storage layer knows about config structure | Pass resolved table names (`main_table`, `rejected_table`) not the config object | Phase 2.5 | ⬜ Not started |
+| AR-4 | No ABC behind `WatermarkManager` — migration to `control` schema requires changing call sites | `WatermarkStore` ABC in `src/shared/base/`; both implementations implement it | Phase 2.5 | ✅ Done (2026-06-26) |
+| AR-5 | `BronzeWriter.write_batch()` receives `stream_cfg` config object — storage layer knows about config structure | Pass resolved table names (`main_table`, `rejected_table`) not the config object | Phase 2.5 | ✅ Done (2026-06-26) |
 | AR-6 | `DataQualityValidator._compute_completeness()` hardcodes equity OHLCV field lists — breaks for FX/futures/crypto | `CompletenessCalculator` ABC, inject asset-class-specific impl | Phase 3 | ⬜ Not started |
-| AR-7 | `_get_pipeline_version()` uses `subprocess.run(git)` — returns "unknown" on Databricks clusters | Read `PIPELINE_VERSION` env var set by DABs; git fallback for local only | Phase 2.5 | ⬜ Not started |
-| AR-8 | Provider output contract is a docstring, not enforced — field name typos surface as Spark errors | `OHLCVRecord` TypedDict; providers return `List[OHLCVRecord]` | Phase 3 | ⬜ Not started |
+| AR-7 | `_get_pipeline_version()` uses `subprocess.run(git)` — returns "unknown" on Databricks clusters | Read `PIPELINE_VERSION` env var set by DABs; git fallback for local only | Phase 2.5 | ✅ Done (2026-06-26) |
+| AR-8 | Provider output contract is a docstring, not enforced — field name typos surface as Spark errors | `OHLCVRecord` TypedDict; providers return `List[OHLCVRecord]` | Phase 3 | ✅ Done (2026-06-26) |
 | AR-9 | `IngestionPlanner.plan()` if-cascade — adding ingestion modes from `ingestion_command` table will make it unmaintainable | Strategy pattern: one `PlanStrategy` class per mode, ordered list | Phase 3 | ⬜ Not started |
 
-### src/shared/ layer (target structure)
+### src/shared/ layer (current state)
 ```
 src/shared/
-├── config/config_loader.py        ← exists
-├── base/                          ← NEW ABCs
-│   ├── data_provider.py           ← HistoricalDataProvider, RealTimeProvider, OptionsProvider (AR-1)
-│   ├── universe_reader.py         ← UniverseReader + InstrumentInfo (AR-3) ✅
-│   ├── watermark_store.py         ← WatermarkStore (AR-4)
-│   ├── trading_calendar.py        ← TradingCalendar (AR-2) ✅
-│   └── completeness_calculator.py ← CompletenessCalculator (AR-6)
+├── config/config_loader.py        ✅ exists
+├── base/
+│   ├── data_provider.py           ✅ HistoricalDataProvider, RealtimeProvider, OptionsProvider (AR-1)
+│   ├── universe_reader.py         ✅ UniverseReader + InstrumentInfo (AR-3)
+│   ├── watermark_store.py         ✅ WatermarkStore ABC (AR-4)
+│   ├── trading_calendar.py        ✅ TradingCalendar ABC (AR-2)
+│   └── completeness_calculator.py ← CompletenessCalculator (AR-6, Phase 3)
 ├── calendar/
-│   ├── us_equity_calendar.py      ← moved from ingestion_planner.py (AR-2) ✅
+│   ├── us_equity_calendar.py      ✅ US holiday calendar (AR-2)
 │   ├── exchange_calendars_calendar.py ← Phase 3
-│   └── always_open_calendar.py    ← Crypto/FX
+│   └── always_open_calendar.py    ← Crypto/FX (Phase 3)
 └── models/
-    └── ohlcv_record.py            ← OHLCVRecord TypedDict (AR-8)
+    └── ohlcv_record.py            ✅ OHLCVRecord TypedDict (AR-8)
 ```
 
 ---
@@ -433,7 +488,7 @@ as NULL in Delta. `validator._enrich_record()` uses `enriched.get("ingested_by",
 which should preserve the value. Investigate whether it's being overwritten somewhere.
 
 ### Phase 2.5 Technical Debt (fix before Phase 3)
-1. **`WatermarkManager` reads/writes `symbol` as key** — must be migrated to `instrument_id` when control tables are built. Currently in `src/bronze/writers/watermark_manager.py`, will move to `src/control/watermark/`.
+1. **`WatermarkManager` reads/writes `symbol` as key** — must be migrated to `instrument_id` when control tables are built. Currently in `src/bronze/writers/watermark_manager.py`, will move to `src/control/watermark/`. `WatermarkStore` ABC already built (AR-4 ✅) — just needs the new implementation.
 2. **`TickerReader` reads from CSV** — replace with `TickerFeedConfigManager` reading from `reference.ticker_feed_config` Delta table.
 3. **`IngestionPlanner` reads from YAML** — replace desired state reads with `ticker_feed_config` Delta table reads.
 4. **`market_calendar`** — replace hardcoded 2010–2040 holiday list with `reference.market_calendar` table driven by `exchange_calendars` Python library.
@@ -442,11 +497,10 @@ which should preserve the value. Investigate whether it's being overwritten some
 1. **BronzeRecord not instantiated** — records flow as dicts, all defaults bypassed.
    Real fix: `validator` creates `BronzeRecord.from_dict()` → typed `to_dict()` output.
    Removes need for manual type alignment in `_spark_append()` (560 lines → 3 lines).
-2. **`_process_ticker()` too long** (~150 lines) — split before adding Phase 4 hooks.
-3. **`provider_nullable_fields`** in `daily.yml` not consumed by validator — wire up.
-4. **`additional_rules`** in config — verify RuleEngine handles list-of-dicts correctly.
-5. **Spike/flash crash DQ rule missing** — add rolling volatility filter to `data_quality_rules.yml`: flag bars where |close_t - close_t-1| / close_t-1 > N × σ_rolling.
-6. **`adjustment_factors` table needed before feature engineering** — adjusted close is a feature input; raw close on split dates will produce artificial jumps in features.
+2. **`additional_rules`** in config — verify RuleEngine handles list-of-dicts correctly.
+3. **Spike/flash crash DQ rule missing** — add rolling volatility filter to `data_quality_rules.yml`: flag bars where |close_t - close_t-1| / close_t-1 > N × σ_rolling.
+4. **`adjustment_factors` table needed before feature engineering** — adjusted close is a feature input; raw close on split dates will produce artificial jumps in features.
+5. **`CompletenessCalculator` ABC** (AR-6) — `_compute_completeness()` still hardcodes equity OHLCV field lists; needs asset-class-specific impl when FX/futures/crypto added.
 
 ---
 
@@ -497,16 +551,16 @@ Feature store: `tradeanalytics.feature_store.*`
 
 1. Upload this `CLAUDE.md` file first
 2. Confirm: any changes since last session?
-3. Run `python -m pytest tests/ -q` — confirm 249 tests passing (on branch `feature/phase3-restructure`)
+3. Run `/Users/hemachandra/anaconda3/envs/tradeanalytics/bin/python -m pytest tests/ -q` — confirm 249 tests (246 passed + 3 skipped gateway tests) on branch `feature/phase3-restructure`
 4. State the immediate task
 5. **Next up (Phase 2.5 — in order):**
    - Create `tradeanalytics.reference` and `tradeanalytics.control` schemas in Unity Catalog
    - Build seed notebook for `reference.instrument`, `reference.instrument_listing`, `reference.universe_membership` (on-demand only, no DABs schedule)
    - Build `reference.ticker_feed_config` and seed with current 8 instruments
    - Build `reference.market_calendar` (using `exchange_calendars` library)
-   - Build `control.ingestion_watermark` (new schema, replaces `bronze.ingestion_watermark_daily`)
+   - Build `control.ingestion_watermark` (new schema, replaces `bronze.ingestion_watermark_daily`) — `WatermarkStore` ABC ready
    - Build `control.ingestion_batch_config`, `control.ingestion_command`, `control.job_run_log`
-   - Migrate `WatermarkManager` from `src/bronze/writers/` → `src/control/watermark/`
+   - Migrate `WatermarkManager` from `src/bronze/writers/` → `src/control/watermark/` (implement `WatermarkStore` ABC)
    - Replace `TickerReader` with `TickerFeedConfigManager` reading from Delta
    - Update `IngestionPlanner` to use new table-driven desired/actual state reconciliation
    - PR and merge `feature/phase3-restructure` → `main`

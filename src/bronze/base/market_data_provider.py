@@ -72,30 +72,35 @@ Standard OHLCV record format (all providers must return this):
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from datetime import date
 from typing import List, Optional
 
 from src.shared.config.config_loader import ConfigNode
+from src.shared.base.data_provider import (
+    HistoricalDataProvider,
+    RealtimeProvider,
+    OptionsProvider,
+)
 
 
-class MarketDataProvider(ABC):
+class MarketDataProvider(HistoricalDataProvider, RealtimeProvider, OptionsProvider):
     """
-    Abstract base class for all market data providers.
+    Composite ABC combining all three provider interfaces.
 
-    Every provider (IBKR, Yahoo, Polygon, etc.) must:
-      1. Inherit from this class
-      2. Implement all abstract methods
-      3. Register with MarketDataFactory
+    Maintained for backward compatibility — existing providers (IBKR, Yahoo) inherit
+    this class and continue to work unchanged. New providers that support only a subset
+    of capabilities should inherit directly from HistoricalDataProvider, RealtimeProvider,
+    or OptionsProvider in src/shared/base/data_provider.py.
 
-    The ingestion layer calls ONLY these methods — never
-    provider-specific code directly.
+    The factory accepts any HistoricalDataProvider subclass.
     """
 
     def __init__(self, config: ConfigNode):
         self._config = config
 
-    # ── Required abstract methods ──────────────────────────────────────────────
+    # ── Abstract methods — declared here for documentation clarity ─────────────
+    # (Already declared abstract in the constituent ABCs; repeated here for IDE support.)
 
     @abstractmethod
     def get_historical(
@@ -104,128 +109,35 @@ class MarketDataProvider(ABC):
         start_date: date,
         end_date: date,
         interval: str = "1d",
-    ) -> List[dict]:
-        """
-        Fetch historical OHLCV data for a symbol.
-
-        Args:
-            symbol:     Ticker symbol e.g. "AAPL"
-            start_date: Start date (inclusive)
-            end_date:   End date (inclusive)
-            interval:   Data interval — "1d" | "1h" | "4h" | "5m" | "1m"
-
-        Returns:
-            List of standard OHLCV dicts (see module docstring for format).
-            Empty list if no data available.
-            Never raises on empty data — raises only on connection/auth errors.
-
-        Raises:
-            ProviderConnectionError: if provider is unreachable
-            ProviderAuthError:       if credentials are invalid
-            ProviderDataError:       if provider returns malformed data
-        """
+    ) -> List[dict]: ...
 
     @abstractmethod
-    def get_latest_quote(self, symbol: str) -> Optional[dict]:
-        """
-        Fetch the latest available quote for a symbol.
-
-        Returns:
-            Dict with at minimum: symbol, bid, ask, last, volume, timestamp
-            None if quote unavailable (e.g. market closed, symbol not found)
-        """
+    def get_latest_quote(self, symbol: str) -> Optional[dict]: ...
 
     @abstractmethod
-    def get_options_chain(
-        self,
-        symbol: str,
-        expiry: date,
-    ) -> List[dict]:
-        """
-        Fetch options chain for a symbol and expiry date.
-
-        Returns:
-            List of option contract dicts.
-            Empty list if provider doesn't support options or no data.
-        """
+    def get_options_chain(self, symbol: str, expiry: date) -> List[dict]: ...
 
     @abstractmethod
-    def is_market_open(self) -> bool:
-        """
-        Returns True if the US stock market is currently open.
-        Should use provider's market hours API if available,
-        otherwise compute from US Eastern time (09:30-16:00 Mon-Fri).
-        """
+    def is_market_open(self) -> bool: ...
 
     @abstractmethod
-    def health_check(self) -> bool:
-        """
-        Verify provider is reachable and credentials are valid.
-
-        Returns:
-            True if provider is healthy and ready to serve data.
-            False if provider is unreachable or auth fails.
-            Should never raise — catch all exceptions and return False.
-
-        Usage:
-            if not provider.health_check():
-                logger.error("Provider unhealthy — switch to fallback")
-                provider = factory.get_fallback_provider(config)
-        """
-
-    # ── Required properties ────────────────────────────────────────────────────
+    def health_check(self) -> bool: ...
 
     @property
     @abstractmethod
-    def provider_name(self) -> str:
-        """
-        Unique string identifier for this provider.
-        Must match the value in config data.source.
-        e.g. "ibkr" | "yahoo" | "polygon"
-        """
+    def provider_name(self) -> str: ...
 
     @property
     @abstractmethod
-    def supports_options(self) -> bool:
-        """True if this provider supports options chain data."""
+    def supports_options(self) -> bool: ...
 
     @property
     @abstractmethod
-    def supports_realtime(self) -> bool:
-        """True if this provider supports real-time quotes."""
+    def supports_realtime(self) -> bool: ...
 
     @property
     @abstractmethod
-    def supported_intervals(self) -> List[str]:
-        """
-        List of interval strings this provider supports.
-        e.g. ["1d", "1h", "5m"]
-        Ingestion job uses this to validate interval before fetching.
-        """
-
-    # ── Concrete helper methods (shared by all providers) ─────────────────────
-
-    def supports_interval(self, interval: str) -> bool:
-        """Returns True if this provider supports the given interval."""
-        return interval in self.supported_intervals
-
-    def get_provider_info(self) -> dict:
-        """Returns a summary dict of provider capabilities."""
-        return {
-            "provider_name":        self.provider_name,
-            "supports_options":     self.supports_options,
-            "supports_realtime":    self.supports_realtime,
-            "supported_intervals":  self.supported_intervals,
-        }
-
-    def __repr__(self) -> str:
-        return (
-            f"{self.__class__.__name__}("
-            f"provider={self.provider_name}, "
-            f"options={self.supports_options}, "
-            f"realtime={self.supports_realtime}"
-            f")"
-        )
+    def supported_intervals(self) -> List[str]: ...
 
 
 # ── Provider exceptions ────────────────────────────────────────────────────────

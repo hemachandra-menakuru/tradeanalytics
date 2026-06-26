@@ -48,7 +48,15 @@ logger = logging.getLogger(__name__)
 
 
 def _get_pipeline_version() -> str:
-    """Get current git commit SHA for audit trail."""
+    """
+    Get pipeline version for audit trail.
+    Reads PIPELINE_VERSION env var first (set by DABs at deploy time via databricks.yml).
+    Falls back to git SHA for local development.
+    """
+    import os
+    version = os.environ.get("PIPELINE_VERSION")
+    if version and version != "unknown":
+        return version
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
@@ -392,40 +400,65 @@ class BronzeIngestionJob:
             batch_id=batch_id,
             clean_records=validation_summary.writable_records,
             rejected_records=validation_summary.rejected_records,
-            stream_cfg=self._stream_cfg,
+            main_table=self._stream_cfg.table,
+            rejected_table=self._stream_cfg.rejected_table,
         )
 
         # Step 7: Update watermark
-        if write_result.records_written > 0 or write_result.records_amended > 0:
-            written_dates = [
-                r.get("date") for r in validation_summary.writable_records
-                if r.get("date")
-            ]
-            if written_dates:
-                min_date = date.fromisoformat(min(written_dates))
-                max_date = date.fromisoformat(max(written_dates))
-
-                # Preserve existing watermark boundaries
-                if watermark is not None:
-                    min_date = min(min_date, watermark.earliest_date)
-                    max_date = max(max_date, watermark.latest_date)
-
-                self._watermark_mgr.update_watermark(
-                    symbol=symbol,
-                    interval=interval,
-                    earliest_date=min_date,
-                    latest_date=max_date,
-                    record_count=self._writer.get_record_count(
-                        symbol=symbol,
-                        interval=interval,
-                        table_name=self._stream_cfg.table,
-                    ),
-                    batch_id=batch_id,
-                    mode=plan.mode.value,
-                    status="success",
-                )
+        self._update_watermark_after_write(
+            symbol=symbol,
+            interval=interval,
+            plan=plan,
+            existing_watermark=watermark,
+            validation_summary=validation_summary,
+            write_result=write_result,
+            batch_id=batch_id,
+        )
 
         return write_result
+
+    def _update_watermark_after_write(
+        self,
+        symbol: str,
+        interval: str,
+        plan,
+        existing_watermark,
+        validation_summary,
+        write_result,
+        batch_id: str,
+    ) -> None:
+        """Update ingestion watermark after a successful write."""
+        if write_result.records_written == 0 and write_result.records_amended == 0:
+            return
+
+        written_dates = [
+            r.get("date") for r in validation_summary.writable_records
+            if r.get("date")
+        ]
+        if not written_dates:
+            return
+
+        min_date = date.fromisoformat(min(written_dates))
+        max_date = date.fromisoformat(max(written_dates))
+
+        if existing_watermark is not None:
+            min_date = min(min_date, existing_watermark.earliest_date)
+            max_date = max(max_date, existing_watermark.latest_date)
+
+        self._watermark_mgr.update_watermark(
+            symbol=symbol,
+            interval=interval,
+            earliest_date=min_date,
+            latest_date=max_date,
+            record_count=self._writer.get_record_count(
+                symbol=symbol,
+                interval=interval,
+                table_name=self._stream_cfg.table,
+            ),
+            batch_id=batch_id,
+            mode=plan.mode.value,
+            status="success",
+        )
 
     def _fetch_in_batches(
         self,

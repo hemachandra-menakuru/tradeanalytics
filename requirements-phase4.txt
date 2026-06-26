@@ -1,0 +1,26 @@
+# Phase 4b — Signal publishing API (REST/WebSocket/Telegram)
+# Install on top of requirements.txt when building the signal publisher
+fastapi==0.137.2
+starlette==1.3.1
+uvicorn==0.49.0
+h11==0.16.0
+Flask==3.1.3
+flask-cors==6.0.5
+Werkzeug==3.1.8
+itsdangerous==2.2.0
+Jinja2==3.1.6
+MarkupSafe==3.0.3
+blinker==1.9.0
+graphene==3.4.3
+graphql-core==3.2.11
+graphql-relay==3.2.0
+gunicorn==26.0.0
+huey==3.0.3
+aiohttp==3.14.1
+aiohappyeyeballs==2.6.2
+aiosignal==1.4.0
+anyio==4.14.0
+frozenlist==1.8.0
+multidict==6.7.1
+propcache==0.5.2
+yarl==1.24.2

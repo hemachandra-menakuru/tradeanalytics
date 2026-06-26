@@ -41,9 +41,15 @@ class DataQualityValidator:
     Use DataQualityValidator.for_stream() to create a stream-aware instance.
     """
 
-    def __init__(self, engine: RuleEngine, stream_name: str = "daily"):
-        self._engine      = engine
-        self._stream_name = stream_name
+    def __init__(
+        self,
+        engine: RuleEngine,
+        stream_name: str = "daily",
+        provider_nullable_fields: Optional[List[str]] = None,
+    ):
+        self._engine                   = engine
+        self._stream_name              = stream_name
+        self._provider_nullable_fields = set(provider_nullable_fields or [])
 
     @classmethod
     def for_stream(
@@ -63,7 +69,7 @@ class DataQualityValidator:
         """
         if rules_path is None:
             repo_root  = _find_repo_root()
-            rules_path = repo_root / "src" / "reference" / "data_quality_rules.yml"
+            rules_path = repo_root / "config" / "quality" / "data_quality_rules.yml"
 
         # Get stream config
         stream_cfg = getattr(config, stream_name, None)
@@ -76,9 +82,10 @@ class DataQualityValidator:
         # Extract validation settings from stream config
         validation_cfg = stream_cfg.get(f"{stream_name}.validation")
 
-        thresholds       = {}
-        additional_rules = []
-        disabled_rules   = []
+        thresholds             = {}
+        additional_rules       = []
+        disabled_rules         = []
+        provider_nullable_fields: list = []
 
         if validation_cfg is not None:
             # Extract thresholds
@@ -106,6 +113,16 @@ class DataQualityValidator:
             if disabled_rules_raw:
                 disabled_rules = list(disabled_rules_raw)
 
+            # Extract provider-declared nullable fields — these are legitimately
+            # absent for certain providers (e.g. IBKR does not supply adj_close)
+            # and must be excluded from the data_completeness_pct calculation.
+            nullable_raw = config.get(
+                f"{stream_name}.validation.provider_nullable_fields",
+                default=[]
+            )
+            if nullable_raw:
+                provider_nullable_fields = list(nullable_raw)
+
         engine = RuleEngine(
             rules_path=rules_path,
             stream_name=stream_name,
@@ -120,7 +137,11 @@ class DataQualityValidator:
             f"{len(thresholds)} threshold overrides"
         )
 
-        return cls(engine=engine, stream_name=stream_name)
+        return cls(
+            engine=engine,
+            stream_name=stream_name,
+            provider_nullable_fields=provider_nullable_fields,
+        )
 
     @classmethod
     def for_daily(cls, config: ConfigNode, rules_path: Optional[Path] = None):
@@ -294,7 +315,8 @@ class DataQualityValidator:
         """
         Compute data completeness score (0–100).
         Core fields weighted 80%, optional fields 20%.
-        Mirrors BronzeRecord.compute_completeness() logic.
+        Fields in provider_nullable_fields are excluded from the denominator —
+        they are legitimately absent for certain providers (e.g. IBKR adj_close).
         """
         core_fields = [
             "open", "high", "low", "close", "volume",
@@ -304,10 +326,16 @@ class DataQualityValidator:
             "trade_count", "pre_market_volume", "post_market_volume",
             "shares_outstanding", "exchange",
         ]
-        core_present     = sum(1 for f in core_fields if record.get(f) is not None)
-        optional_present = sum(1 for f in optional_fields if record.get(f) is not None)
-        core_score       = (core_present / len(core_fields)) * 80
-        optional_score   = (optional_present / len(optional_fields)) * 20
+        # Drop provider-declared nullable fields from scoring
+        nullable = self._provider_nullable_fields
+        core_scored     = [f for f in core_fields if f not in nullable]
+        optional_scored = [f for f in optional_fields if f not in nullable]
+
+        core_present     = sum(1 for f in core_scored if record.get(f) is not None)
+        optional_present = sum(1 for f in optional_scored if record.get(f) is not None)
+
+        core_score     = (core_present / len(core_scored)) * 80 if core_scored else 80.0
+        optional_score = (optional_present / len(optional_scored)) * 20 if optional_scored else 20.0
         return round(core_score + optional_score, 1)
 
     def _build_rejected_record(self, record, rule_name, reason, batch_id, pipeline_version):

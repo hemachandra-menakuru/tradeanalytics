@@ -31,11 +31,13 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import ssl
 import time
 import urllib.error
 import urllib.request
 from datetime import date, datetime, timezone, timedelta
+from pathlib import Path
 from typing import Dict, List, Optional
 from zoneinfo import ZoneInfo
 
@@ -94,8 +96,9 @@ class IBKRProvider(MarketDataProvider):
         self._ssl_ctx.check_hostname = False
         self._ssl_ctx.verify_mode    = ssl.CERT_NONE
 
-        # conid cache — avoid repeated contract searches
-        self._conid_cache: Dict[str, str] = {}
+        # conid cache — persisted to disk so conid lookups survive job restarts
+        self._conid_cache_path = Path.home() / ".tradeanalytics" / "ibkr_conid_cache.json"
+        self._conid_cache: Dict[str, str] = self._load_conid_cache()
 
         logger.info(
             f"IBKRProvider initialised — "
@@ -181,6 +184,23 @@ class IBKRProvider(MarketDataProvider):
         except json.JSONDecodeError as e:
             raise ProviderDataError(f"Invalid JSON from IBKR: {e}")
 
+    # ── conid cache (file-persisted) ───────────────────────────────────────────
+
+    def _load_conid_cache(self) -> Dict[str, str]:
+        try:
+            if self._conid_cache_path.exists():
+                return json.loads(self._conid_cache_path.read_text())
+        except Exception as e:
+            logger.warning(f"Could not load conid cache: {e}")
+        return {}
+
+    def _save_conid_cache(self) -> None:
+        try:
+            self._conid_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            self._conid_cache_path.write_text(json.dumps(self._conid_cache))
+        except Exception as e:
+            logger.warning(f"Could not save conid cache: {e}")
+
     # ── Contract resolution ────────────────────────────────────────────────────
 
     def _get_conid(self, symbol: str) -> str:
@@ -220,6 +240,7 @@ class IBKRProvider(MarketDataProvider):
             )
 
         self._conid_cache[symbol] = conid
+        self._save_conid_cache()
         logger.debug(f"[{symbol}] Resolved conid={conid}")
         return conid
 

@@ -140,7 +140,8 @@ class BronzeWriter:
         batch_id: str,
         clean_records: List[dict],
         rejected_records: List[dict],
-        stream_cfg,
+        main_table: str,
+        rejected_table: str,
     ) -> BronzeWriteResult:
         """
         Write validated records to Bronze tables.
@@ -154,16 +155,14 @@ class BronzeWriter:
             batch_id:         Unique batch identifier
             clean_records:    Passed + flagged records → main table
             rejected_records: Rejected records → rejected table
-            stream_cfg:       Stream config node (has table names)
+            main_table:       Resolved Bronze table name (e.g. "market_data_daily")
+            rejected_table:   Resolved rejected table name
 
         Returns:
             BronzeWriteResult with counts and timing
         """
         import time
         start_ms = time.time()
-
-        main_table     = stream_cfg.table
-        rejected_table = stream_cfg.rejected_table
 
         # Layer 2 deduplication — bulk classify (ONE query total)
         new_records, amended, skipped_count = self._bulk_classify(
@@ -407,50 +406,53 @@ class BronzeWriter:
         daily_keys    = [(s, d, i) for s, d, i, bt in keys if bt is None]
         intraday_keys = [(s, d, i, bt) for s, d, i, bt in keys if bt is not None]
 
-        predicates = []
-
-        if daily_keys:
-            # Use (symbol, date, interval) IN ((...), (...), ...)
-            tuples = ", ".join(
-                f"('{s}', '{d}', '{iv}')"
-                for s, d, iv in daily_keys
-            )
-            predicates.append(
-                f"(symbol, CAST(date AS STRING), interval) IN ({tuples})"
-            )
-
-        if intraday_keys:
-            tuples = ", ".join(
-                f"('{s}', '{d}', '{iv}', '{bt}')"
-                for s, d, iv, bt in intraday_keys
-            )
-            predicates.append(
-                f"(symbol, CAST(date AS STRING), interval, "
-                f"CAST(bar_time_utc AS STRING)) IN ({tuples})"
-            )
-
-        if not predicates:
+        if not daily_keys and not intraday_keys:
             return {}
 
-        where_clause = " OR ".join(f"({p})" for p in predicates)
+        # Build a keys DataFrame and JOIN — avoids SQL injection via f-string IN-clause.
+        # bar_time_utc is None for daily keys, set for intraday keys.
+        from pyspark.sql import functions as F
+        from pyspark.sql.types import StructType, StructField, StringType
+        from pyspark.sql.window import Window
 
-        # Single query — window function picks latest version per key
-        query = f"""
-            SELECT *
-            FROM (
-                SELECT *,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY symbol, date, interval, bar_time_utc
-                        ORDER BY record_version DESC
-                    ) AS _rn
-                FROM {full_table}
-                WHERE {where_clause}
+        all_key_rows = (
+            [(s, d, i, None) for s, d, i in daily_keys] +
+            [(s, d, i, bt)   for s, d, i, bt in intraday_keys]
+        )
+        keys_schema = StructType([
+            StructField("_k_symbol",   StringType(), True),
+            StructField("_k_date",     StringType(), True),
+            StructField("_k_interval", StringType(), True),
+            StructField("_k_bar_time", StringType(), True),
+        ])
+        keys_df = self._spark.createDataFrame(all_key_rows, schema=keys_schema)
+
+        table_df = self._spark.table(full_table)
+
+        join_cond = (
+            (table_df["symbol"]   == keys_df["_k_symbol"]) &
+            (table_df["date"].cast("string") == keys_df["_k_date"]) &
+            (table_df["interval"] == keys_df["_k_interval"]) &
+            (
+                (table_df["bar_time_utc"].isNull() & keys_df["_k_bar_time"].isNull()) |
+                (table_df["bar_time_utc"].cast("string") == keys_df["_k_bar_time"])
             )
-            WHERE _rn = 1
-        """
+        )
+        matched_df = table_df.join(keys_df, on=join_cond, how="inner").select(table_df["*"])
+
+        window_spec = Window.partitionBy(
+            "symbol", "date", "interval", "bar_time_utc"
+        ).orderBy(F.desc("record_version"))
+
+        deduped_df = (
+            matched_df
+            .withColumn("_rn", F.row_number().over(window_spec))
+            .filter(F.col("_rn") == 1)
+            .drop("_rn")
+        )
 
         try:
-            df = self._spark.sql(query)
+            df = deduped_df
             result: _ExistingRecordMap = {}
             for row in df.collect():
                 r = row.asDict()

@@ -5,6 +5,9 @@ variables:
   env:
     description: Deployment environment
     default: dev
+  pipeline_version:
+    description: Pipeline version for audit trail — override at deploy time with git SHA
+    default: "unknown"
 
 targets:
   dev:
@@ -61,6 +64,7 @@ resources:
               spark.databricks.delta.preview.enabled: "true"
             spark_env_vars:
               ENVIRONMENT: "${var.env}"
+              PIPELINE_VERSION: "${var.pipeline_version}"
       tags:
         project:    tradeanalytics
         layer:      bronze
@@ -110,6 +114,7 @@ resources:
               spark.databricks.delta.preview.enabled: "true"
             spark_env_vars:
               ENVIRONMENT: "${var.env}"
+              PIPELINE_VERSION: "${var.pipeline_version}"
       tags:
         project:    tradeanalytics
         layer:      reference

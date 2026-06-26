@@ -3,18 +3,13 @@ import pytest
 from src.bronze.writers.bronze_writer import BronzeWriter, BronzeWriteResult
 from unittest.mock import MagicMock
 
+MAIN_TABLE     = "market_data_daily"
+REJECTED_TABLE = "market_data_rejected"
+
 
 @pytest.fixture
 def writer():
     return BronzeWriter(mode="local")
-
-
-@pytest.fixture
-def stream_cfg():
-    cfg = MagicMock()
-    cfg.table          = "market_data_daily"
-    cfg.rejected_table = "market_data_rejected"
-    return cfg
 
 
 @pytest.fixture
@@ -45,111 +40,111 @@ def rejected_record():
 
 # ── Write tests ───────────────────────────────────────────────────────────────
 
-def test_write_clean_record(writer, stream_cfg, clean_record):
+def test_write_clean_record(writer, clean_record):
     result = writer.write_batch(
         symbol="AAPL", interval="1d", batch_id="batch_001",
         clean_records=[clean_record], rejected_records=[],
-        stream_cfg=stream_cfg,
+        main_table=MAIN_TABLE, rejected_table=REJECTED_TABLE,
     )
     assert result.records_written == 1
     assert result.records_skipped == 0
     assert result.records_amended == 0
 
 
-def test_write_rejected_record(writer, stream_cfg, rejected_record):
+def test_write_rejected_record(writer, rejected_record):
     result = writer.write_batch(
         symbol="AAPL", interval="1d", batch_id="batch_001",
         clean_records=[], rejected_records=[rejected_record],
-        stream_cfg=stream_cfg,
+        main_table=MAIN_TABLE, rejected_table=REJECTED_TABLE,
     )
     assert result.rejected_written == 1
-    rejected = writer.get_local_records("market_data_rejected")
+    rejected = writer.get_local_records(REJECTED_TABLE)
     assert len(rejected) == 1
 
 
-def test_write_empty_batch(writer, stream_cfg):
+def test_write_empty_batch(writer):
     result = writer.write_batch(
         symbol="AAPL", interval="1d", batch_id="batch_001",
         clean_records=[], rejected_records=[],
-        stream_cfg=stream_cfg,
+        main_table=MAIN_TABLE, rejected_table=REJECTED_TABLE,
     )
     assert result.records_written == 0
     assert result.rejected_written == 0
 
 
-def test_duplicate_record_is_skipped(writer, stream_cfg, clean_record):
+def test_duplicate_record_is_skipped(writer, clean_record):
     # Write once
     writer.write_batch(
         symbol="AAPL", interval="1d", batch_id="batch_001",
         clean_records=[clean_record], rejected_records=[],
-        stream_cfg=stream_cfg,
+        main_table=MAIN_TABLE, rejected_table=REJECTED_TABLE,
     )
     # Write same record again
     result = writer.write_batch(
         symbol="AAPL", interval="1d", batch_id="batch_002",
         clean_records=[clean_record], rejected_records=[],
-        stream_cfg=stream_cfg,
+        main_table=MAIN_TABLE, rejected_table=REJECTED_TABLE,
     )
     assert result.records_skipped == 1
     assert result.records_written == 0
 
 
-def test_amended_record_is_written(writer, stream_cfg, clean_record):
+def test_amended_record_is_written(writer, clean_record):
     # Write original
     writer.write_batch(
         symbol="AAPL", interval="1d", batch_id="batch_001",
         clean_records=[clean_record], rejected_records=[],
-        stream_cfg=stream_cfg,
+        main_table=MAIN_TABLE, rejected_table=REJECTED_TABLE,
     )
     # Write amendment with different close price
     amended = clean_record.copy()
-    amended["close"] = 152.00  # price changed
+    amended["close"] = 152.00
     amended["record_version"] = 2
 
     result = writer.write_batch(
         symbol="AAPL", interval="1d", batch_id="batch_002",
         clean_records=[amended], rejected_records=[],
-        stream_cfg=stream_cfg,
+        main_table=MAIN_TABLE, rejected_table=REJECTED_TABLE,
     )
     assert result.records_amended == 1
     assert result.records_skipped == 0
 
 
-def test_records_stored_in_local_store(writer, stream_cfg, clean_record):
+def test_records_stored_in_local_store(writer, clean_record):
     writer.write_batch(
         symbol="AAPL", interval="1d", batch_id="batch_001",
         clean_records=[clean_record], rejected_records=[],
-        stream_cfg=stream_cfg,
+        main_table=MAIN_TABLE, rejected_table=REJECTED_TABLE,
     )
-    records = writer.get_local_records("market_data_daily")
+    records = writer.get_local_records(MAIN_TABLE)
     assert len(records) == 1
 
 
-def test_clear_local_store(writer, stream_cfg, clean_record):
+def test_clear_local_store(writer, clean_record):
     writer.write_batch(
         symbol="AAPL", interval="1d", batch_id="batch_001",
         clean_records=[clean_record], rejected_records=[],
-        stream_cfg=stream_cfg,
+        main_table=MAIN_TABLE, rejected_table=REJECTED_TABLE,
     )
     writer.clear_local_store()
-    assert writer.get_local_record_count("market_data_daily") == 0
+    assert writer.get_local_record_count(MAIN_TABLE) == 0
 
 
-def test_write_result_repr(writer, stream_cfg, clean_record):
+def test_write_result_repr(writer, clean_record):
     result = writer.write_batch(
         symbol="AAPL", interval="1d", batch_id="batch_001",
         clean_records=[clean_record], rejected_records=[],
-        stream_cfg=stream_cfg,
+        main_table=MAIN_TABLE, rejected_table=REJECTED_TABLE,
     )
     r = repr(result)
     assert "AAPL" in r
     assert "written=1" in r
 
 
-def test_total_processed(writer, stream_cfg, clean_record):
+def test_total_processed(writer, clean_record):
     result = writer.write_batch(
         symbol="AAPL", interval="1d", batch_id="batch_001",
         clean_records=[clean_record], rejected_records=[],
-        stream_cfg=stream_cfg,
+        main_table=MAIN_TABLE, rejected_table=REJECTED_TABLE,
     )
     assert result.total_processed == 1
