@@ -29,7 +29,10 @@
 # MAGIC     updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP()
 # MAGIC )
 # MAGIC USING DELTA
-# MAGIC TBLPROPERTIES ('delta.enableChangeDataFeed' = 'true');
+# MAGIC TBLPROPERTIES (
+# MAGIC     'delta.enableChangeDataFeed'          = 'true',
+# MAGIC     'delta.feature.allowColumnDefaults'   = 'supported'
+# MAGIC );
 
 # COMMAND ----------
 
@@ -51,7 +54,10 @@
 # MAGIC     created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP()
 # MAGIC )
 # MAGIC USING DELTA
-# MAGIC TBLPROPERTIES ('delta.enableChangeDataFeed' = 'true');
+# MAGIC TBLPROPERTIES (
+# MAGIC     'delta.enableChangeDataFeed'          = 'true',
+# MAGIC     'delta.feature.allowColumnDefaults'   = 'supported'
+# MAGIC );
 
 # COMMAND ----------
 
@@ -69,7 +75,10 @@
 # MAGIC     updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP()
 # MAGIC )
 # MAGIC USING DELTA
-# MAGIC TBLPROPERTIES ('delta.enableChangeDataFeed' = 'true');
+# MAGIC TBLPROPERTIES (
+# MAGIC     'delta.enableChangeDataFeed'          = 'true',
+# MAGIC     'delta.feature.allowColumnDefaults'   = 'supported'
+# MAGIC );
 
 # COMMAND ----------
 
@@ -90,7 +99,10 @@
 # MAGIC     created_by          STRING
 # MAGIC )
 # MAGIC USING DELTA
-# MAGIC TBLPROPERTIES ('delta.enableChangeDataFeed' = 'true');
+# MAGIC TBLPROPERTIES (
+# MAGIC     'delta.enableChangeDataFeed'          = 'true',
+# MAGIC     'delta.feature.allowColumnDefaults'   = 'supported'
+# MAGIC );
 
 # COMMAND ----------
 
@@ -108,7 +120,10 @@
 # MAGIC     created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP()
 # MAGIC )
 # MAGIC USING DELTA
-# MAGIC TBLPROPERTIES ('delta.appendOnly' = 'true');
+# MAGIC TBLPROPERTIES (
+# MAGIC     'delta.appendOnly'                    = 'true',
+# MAGIC     'delta.feature.allowColumnDefaults'   = 'supported'
+# MAGIC );
 
 # COMMAND ----------
 
@@ -132,7 +147,10 @@
 # MAGIC     created_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP(),
 # MAGIC     updated_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP()
 # MAGIC )
-# MAGIC USING DELTA;
+# MAGIC USING DELTA
+# MAGIC TBLPROPERTIES (
+# MAGIC     'delta.feature.allowColumnDefaults'   = 'supported'
+# MAGIC );
 
 # COMMAND ----------
 
@@ -149,7 +167,10 @@
 # MAGIC     updated_at                  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP(),
 # MAGIC     updated_by                  STRING
 # MAGIC )
-# MAGIC USING DELTA;
+# MAGIC USING DELTA
+# MAGIC TBLPROPERTIES (
+# MAGIC     'delta.feature.allowColumnDefaults'   = 'supported'
+# MAGIC );
 
 # COMMAND ----------
 
@@ -168,7 +189,10 @@
 # MAGIC     created_at          TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP(),
 # MAGIC     created_by          STRING
 # MAGIC )
-# MAGIC USING DELTA;
+# MAGIC USING DELTA
+# MAGIC TBLPROPERTIES (
+# MAGIC     'delta.feature.allowColumnDefaults'   = 'supported'
+# MAGIC );
 
 # COMMAND ----------
 
@@ -198,7 +222,10 @@
 # MAGIC     cluster_id          STRING
 # MAGIC )
 # MAGIC USING DELTA
-# MAGIC TBLPROPERTIES ('delta.appendOnly' = 'true');
+# MAGIC TBLPROPERTIES (
+# MAGIC     'delta.appendOnly'                    = 'true',
+# MAGIC     'delta.feature.allowColumnDefaults'   = 'supported'
+# MAGIC );
 
 # COMMAND ----------
 
