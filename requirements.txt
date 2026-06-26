@@ -26,6 +26,7 @@ mlflow-skinny==3.14.0
 mlflow-tracing==3.14.0
 narwhals==2.22.1
 numpy==2.4.6
+openpyxl==3.1.5
 opentelemetry-api==1.42.1
 opentelemetry-proto==1.42.1
 opentelemetry-sdk==1.42.1
