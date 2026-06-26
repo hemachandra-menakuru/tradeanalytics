@@ -39,7 +39,8 @@ CREATE TABLE IF NOT EXISTS tradeanalytics.reference.instrument (
 USING DELTA
 COMMENT 'Permanent master record per financial instrument. Never deleted.'
 TBLPROPERTIES (
-    'delta.enableChangeDataFeed' = 'true'
+    'delta.enableChangeDataFeed'        = 'true',
+    'delta.feature.allowColumnDefaults' = 'supported'
 )
 """)
 print("✓ reference.instrument")
@@ -76,7 +77,8 @@ CREATE TABLE IF NOT EXISTS tradeanalytics.reference.instrument_listing (
 USING DELTA
 COMMENT 'Symbol and exchange per instrument. SCD Type 2 — preserves symbol rename history.'
 TBLPROPERTIES (
-    'delta.enableChangeDataFeed' = 'true'
+    'delta.enableChangeDataFeed'        = 'true',
+    'delta.feature.allowColumnDefaults' = 'supported'
 )
 """)
 print("✓ reference.instrument_listing")
@@ -110,7 +112,8 @@ USING DELTA
 COMMENT 'Index universe membership per instrument. SP500, NDX100, RUSSELL2000, ETF_CURATED.'
 PARTITIONED BY (universe_code)
 TBLPROPERTIES (
-    'delta.enableChangeDataFeed' = 'true'
+    'delta.enableChangeDataFeed'        = 'true',
+    'delta.feature.allowColumnDefaults' = 'supported'
 )
 """)
 print("✓ reference.universe_membership")
@@ -146,7 +149,8 @@ CREATE TABLE IF NOT EXISTS tradeanalytics.reference.instrument_feed_config (
 USING DELTA
 COMMENT 'Desired ingestion state per instrument. is_active=false = known but not ingesting.'
 TBLPROPERTIES (
-    'delta.enableChangeDataFeed' = 'true'
+    'delta.enableChangeDataFeed'        = 'true',
+    'delta.feature.allowColumnDefaults' = 'supported'
 )
 """)
 print("✓ reference.instrument_feed_config")
