@@ -1,16 +1,21 @@
 """
 TradeAnalytics Ticker Reader
 =============================
-Reads active tickers from src/reference/tickers.csv.
-Provides filtered views — active only, by sector, by asset class.
+CSV-backed implementation of UniverseReader.
+Reads active tickers from src/reference/seed/tickers.csv.
 
-The ticker list drives which symbols get ingested on every job run.
-To add a new symbol: add a row to tickers.csv, set active=true.
-To stop ingesting a symbol: set active=false (historical data preserved).
+Phase 2.5 migration path:
+  This class will be replaced by DeltaUniverseReader, which reads from
+  tradeanalytics.reference.ticker_feed_config.
+  BronzeIngestionJob depends on the UniverseReader ABC, so the swap
+  requires zero changes to the job — only the construction call site changes.
 
 CSV columns:
   symbol, name, sector, asset_class, active, added_date,
   min_price, market_cap_tier, history_start, ipo_date, notes
+
+To add a new symbol: add a row to tickers.csv, set active=true.
+To stop ingesting a symbol: set active=false (historical data preserved).
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from src.shared.config.config_loader import ConfigNode, _find_repo_root
+from src.shared.base.universe_reader import UniverseReader, InstrumentInfo
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +36,11 @@ logger = logging.getLogger(__name__)
 @dataclass
 class TickerInfo:
     """
-    Metadata for one ticker from ref_tickers.csv.
-    Used by IngestionPlanner to determine per-ticker fetch range.
+    Internal CSV row model. Carries CSV-specific fields (min_price, notes, etc.)
+    that are not part of InstrumentInfo.
+
+    TickerReader.to_instrument_info() converts TickerInfo → InstrumentInfo
+    for the UniverseReader interface.
     """
     symbol:           str
     name:             str
@@ -53,6 +62,22 @@ class TickerInfo:
         """
         return self.history_start or self.ipo_date
 
+    def to_instrument_info(self) -> InstrumentInfo:
+        """Convert to the shared InstrumentInfo model."""
+        return InstrumentInfo(
+            symbol          = self.symbol,
+            name            = self.name,
+            asset_class     = self.asset_class,
+            active          = self.active,
+            history_start   = self.history_start,
+            instrument_id   = None,        # not available from CSV
+            exchange_mic    = None,        # not available from CSV
+            currency        = None,        # not available from CSV
+            sector          = self.sector,
+            market_cap_tier = self.market_cap_tier,
+            ipo_date        = self.ipo_date,
+        )
+
     def __repr__(self) -> str:
         return (
             f"TickerInfo(symbol={self.symbol}, "
@@ -62,15 +87,18 @@ class TickerInfo:
         )
 
 
-class TickerReader:
+class TickerReader(UniverseReader):
     """
-    Reads and filters tickers from src/reference/tickers.csv.
+    CSV-backed UniverseReader. Reads from src/reference/seed/tickers.csv.
 
     Usage:
         reader = TickerReader(config)
+
+        # UniverseReader interface (used by BronzeIngestionJob):
+        instruments = reader.get_active_instruments()
+
+        # Legacy TickerInfo interface (used by tests and internal code):
         tickers = reader.get_active_tickers()
-        for ticker in tickers:
-            print(ticker.symbol, ticker.effective_history_start)
     """
 
     def __init__(
@@ -205,3 +233,32 @@ class TickerReader:
     @property
     def active_count(self) -> int:
         return sum(1 for t in self._load() if t.active)
+
+    # ── UniverseReader interface ───────────────────────────────────────────────
+
+    def get_active_instruments(
+        self,
+        symbols: Optional[List[str]] = None,
+        asset_classes: Optional[List[str]] = None,
+    ) -> List[InstrumentInfo]:
+        """
+        UniverseReader implementation — returns InstrumentInfo objects.
+        Delegates to get_active_tickers() then converts to InstrumentInfo.
+        """
+        tickers = self.get_active_tickers(
+            symbols=symbols,
+            asset_classes=asset_classes,
+        )
+        return [t.to_instrument_info() for t in tickers]
+
+    def get_instrument(self, symbol: str) -> Optional[InstrumentInfo]:
+        """UniverseReader implementation."""
+        ticker = self.get_ticker(symbol)
+        return ticker.to_instrument_info() if ticker is not None else None
+
+    def get_symbols(self, active_only: bool = True) -> List[str]:
+        """UniverseReader implementation."""
+        tickers = self._load()
+        if active_only:
+            tickers = [t for t in tickers if t.active]
+        return [t.symbol for t in tickers]

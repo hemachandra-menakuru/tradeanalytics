@@ -22,7 +22,7 @@
 | IBKR account | `U5498892`, gateway at `~/dev/tools/ibkr/clientportal.gw`, port `5055` |
 | Conda env | `tradeanalytics` (Python 3.11, `databricks-connect==15.4.25`) |
 | Repo path (local) | `/Users/hemachandra/projects/tradeanalytics` (shell alias: `~/pr/tradeanalytics`) |
-| Active branch | `main` (Phase 2 merged 2026-06-25 via PR #6) |
+| Active branch | `feature/phase3-restructure` (pre-Phase 3 redesign — not yet merged) |
 | Git pager | Disabled — `git config --global core.pager cat` (already set) |
 
 ---
@@ -84,7 +84,8 @@ Adding a new component = implement ABC + register (one line) + update YAML. Zero
 |-------|------|--------|
 | 1 | Infrastructure | ✅ Complete |
 | 2 | Bronze Ingestion | ✅ Merged to main — PR #6, 2026-06-25. IBKR smoke test passed, source=ibkr confirmed |
-| 3 | Silver (Feature Engineering) | Not started |
+| 2.5 | Pre-Phase 3 Restructure | 🔄 In progress — branch `feature/phase3-restructure`. Folder layout done, table architecture designed, code not yet written |
+| 3 | Silver (Feature Engineering) | Not started — blocked on Phase 2.5 completion |
 | 4 | Gold + Signal Platform | Not started |
 | 4b | Signal sharing (Telegram/API) | Not started |
 | 5a | HC's execution bot | Not started |
@@ -102,6 +103,8 @@ Adding a new component = implement ABC + register (one line) + update YAML. Zero
 
 ## 4. File Structure
 
+Restructured on `feature/phase3-restructure` (2026-06-25). Old `src/ingestion/` and `src/config/` folders removed.
+
 ```
 tradeanalytics/
 ├── config/
@@ -114,8 +117,9 @@ tradeanalytics/
 │       ├── intraday.yml         # Phase 3, disabled
 │       └── tick.yml             # Phase 5, disabled
 ├── src/
-│   ├── config/config_loader.py
-│   ├── ingestion/
+│   ├── shared/
+│   │   └── config/config_loader.py         # moved from src/config/ — import: src.shared.config.config_loader
+│   ├── bronze/                             # renamed from src/ingestion/
 │   │   ├── base/market_data_provider.py    # MarketDataProvider ABC
 │   │   ├── factory/provider_factory.py     # MarketDataFactory (registry)
 │   │   ├── jobs/bronze_ingestion_job.py    # BronzeIngestionJob + JobRunSummary
@@ -126,22 +130,39 @@ tradeanalytics/
 │   │   ├── providers/
 │   │   │   ├── ibkr_provider.py            # IBKRProvider (primary, live-verified)
 │   │   │   └── yahoo_provider.py           # YahooProvider (unit test fallback only)
-│   │   ├── readers/ticker_reader.py
 │   │   ├── validation/
 │   │   │   ├── models.py
 │   │   │   ├── rule_engine.py              # RuleEngine (18 rules from YAML)
 │   │   │   └── validator.py               # DataQualityValidator
 │   │   └── writers/
 │   │       ├── bronze_writer.py            # BronzeWriter (bulk pre-fetch, explicit schema)
-│   │       └── watermark_manager.py        # WatermarkManager (explicit StructType schema)
-│   └── reference/
-│       ├── tickers.csv
-│       └── data_quality_rules.yml
-├── notebooks/bronze_daily_ingestion.py     # Databricks entry point
+│   │       └── watermark_manager.py        # WatermarkManager — to move to src/control/ in Phase 2.5
+│   ├── reference/
+│   │   ├── managers/ticker_reader.py       # reads from seed CSV (to be replaced by Delta table manager)
+│   │   └── seed/
+│   │       ├── tickers.csv                 # bootstrap seed only — NOT source of truth in production
+│   │       ├── strategies.csv
+│   │       └── data_quality_rules.yml
+│   ├── control/                            # Phase 2.5 — watermark manager moves here
+│   ├── silver/                             # Phase 3 placeholders
+│   ├── gold/                               # Phase 4 placeholders
+│   ├── api/                                # Phase 4b placeholders
+│   ├── execution/                          # Phase 5 placeholders
+│   └── llm/                               # Phase 4 placeholders
+├── notebooks/
+│   └── bronze/bronze_daily_ingestion.py   # Databricks entry point (path updated in databricks.yml)
 ├── databricks.yml                          # DABs bundle (job ID: 174217366433843)
-├── TradeAnalytics_Phase2_Data_Ingestion_Guide.docx  # Phase 2 operational guide
-└── tests/                                  # 249 tests passing
+├── TradeAnalytics_Phase2_Data_Ingestion_Guide.docx
+└── tests/
+    ├── bronze/                             # renamed from tests/ingestion/
+    ├── reference/managers/
+    └── shared/config/                      # renamed from tests/config/
 ```
+
+**Import paths after restructure:**
+- Config: `from src.shared.config.config_loader import ConfigLoader`
+- Bronze: `from src.bronze.writers.bronze_writer import BronzeWriter`
+- Reference: `from src.reference.managers.ticker_reader import TickerReader`
 
 ---
 
@@ -206,7 +227,108 @@ MarketDataFactory.register("yahoo", YahooProvider)
 
 ---
 
-## 6. Databricks Job
+## 6. Reference & Control Table Architecture (Designed 2026-06-25, not yet built)
+
+Full design doc: `TradeAnalytics — ML Trading Pipeline/Ingestion_Architecture_Design.md`
+
+### Core design decisions (locked)
+
+**Never use ticker symbol as a primary key.** Symbols are fragile — they change (FB→META), get reused after delistings, and are ambiguous across exchanges. Every table uses `instrument_id` (internal BIGINT surrogate) as the join key. Symbol is a display attribute in `instrument_listing` only.
+
+**Desired state vs actual state reconciliation.** The IngestionPlanner DERIVES load type by comparing what we want (`ticker_feed_config`) against what we have (`ingestion_watermark`). Load type is never configured — it is always computed. No watermark = initial load. Watermark behind target = incremental. Watermark ahead of target_start = history extension.
+
+**Watermark is ACTUAL STATE — never manually touch it.** It is a system mirror. Manual inserts or updates cause phantom loads or silent skips. Control ingestion via `ticker_feed_config` (ongoing) or `ingestion_command` (one-off).
+
+**Load type is derived, never configured.** You control desired state; the planner figures out what to fetch.
+
+### Unity Catalog schemas
+
+```
+tradeanalytics.reference   — WHAT exists and WHAT we want
+tradeanalytics.control     — WHAT has happened and WHAT to do next
+tradeanalytics.bronze      — append-only OHLCV (existing)
+tradeanalytics.silver      — Phase 3 (feature store)
+tradeanalytics.gold        — Phase 4 (signals, ML)
+```
+
+### Reference tables
+
+| Table | Purpose | Key |
+|---|---|---|
+| `reference.instrument` | Permanent master record per financial instrument | `instrument_id` (BIGINT, auto, permanent) |
+| `reference.instrument_listing` | Symbol, exchange, MIC — SCD Type 2 | `listing_id`; FK `instrument_id` |
+| `reference.universe_membership` | Which instruments are in which trading universe | FK `instrument_id` |
+| `reference.ticker_feed_config` | DESIRED STATE — target dates, run_frequency, batch_group, priority | FK `instrument_id` |
+| `reference.corporate_actions` | Splits, dividends (raw events) | FK `instrument_id` |
+| `reference.adjustment_factors` | Cumulative price adjustment factors per date | FK `instrument_id` |
+| `reference.market_calendar` | Exchange holidays and half-days | `exchange_mic + date` |
+
+**`instrument` key fields:** `instrument_id`, `isin` (ISO 6166), `figi` (OpenFIGI), `ibkr_con_id`, `asset_class`
+
+**`instrument_listing` key fields:** `symbol`, `exchange`, `exchange_mic` (ISO 10383), `currency`, `min_tick_size`, `min_lot_size`, `valid_from`, `valid_to`, `is_current`, `change_reason`
+
+**`ticker_feed_config` key fields:** `target_start_date`, `target_end_date` (NULL=ongoing), `run_frequency` (daily|weekly|monthly|on_demand), `batch_group` (A|B|C|D), `priority`, `is_active`, `max_lookback_days`
+
+**`adjustment_factors`:** Bronze stores RAW prices. Silver views multiply by `cumulative_split_factor` at read time. Execution always uses raw prices. Bronze is never modified for corporate actions.
+
+### Control tables
+
+| Table | Purpose | Key |
+|---|---|---|
+| `control.ingestion_watermark` | ACTUAL STATE — earliest/latest date fetched, status, consecutive_failures | FK `instrument_id + stream` |
+| `control.ingestion_batch_config` | Which batch_groups and run_frequencies execute per job type | `job_type` |
+| `control.ingestion_command` | Explicit one-off instructions (FORCE_RELOAD, PAUSE, RESUME, SKIP_ONCE) | auto, consumed once |
+| `control.job_run_log` | Full audit trail — records_new, records_rejected, load_type, status per run | auto |
+
+**Watermark status values:** `active` | `suspended` (after N consecutive failures, stops auto-retry) | `paused`
+
+**ingestion_command action values:** `FORCE_RELOAD` | `HISTORY_LOAD` | `PAUSE` | `RESUME` | `SKIP_ONCE`
+
+### IngestionPlanner load type derivation (new design)
+
+```
+For each instrument per run:
+1. Check ingestion_command for pending commands → process first (PAUSE/RESUME/FORCE_RELOAD)
+2. Read ticker_feed_config (desired state)
+3. Read ingestion_watermark (actual state)
+4. Derive:
+   - No watermark           → INITIAL_LOAD (from target_start_date or today - max_lookback_days)
+   - status = suspended     → SKIP
+   - latest_date < target   → INCREMENTAL
+   - earliest_date > target_start → HISTORY_EXTENSION
+   - gaps detected          → GAP_FILL
+   - FORCE_RELOAD command   → FORCE_RELOAD
+   - otherwise              → NO_OP
+```
+
+### Day-to-day operator actions
+
+| Task | Action |
+|---|---|
+| Add new ticker | INSERT into `instrument`, `instrument_listing`, `universe_membership`, `ticker_feed_config` |
+| Pause a ticker | `UPDATE ticker_feed_config SET is_active = false` OR INSERT PAUSE command |
+| Resume suspended ticker | INSERT RESUME into `ingestion_command` |
+| Force reload date range | INSERT FORCE_RELOAD into `ingestion_command` with override dates |
+| Extend history further back | `UPDATE ticker_feed_config SET target_start_date = '2010-01-01'` |
+| Control daily batch scope | `UPDATE ingestion_batch_config` — change batch_groups_included |
+
+### Table → Python class mapping (to be built in Phase 2.5)
+
+| Table | Python class | Location |
+|---|---|---|
+| `reference.instrument` | `InstrumentManager` | `src/reference/managers/` |
+| `reference.instrument_listing` | `InstrumentManager` | `src/reference/managers/` |
+| `reference.ticker_feed_config` | `TickerFeedConfigManager` (replaces `TickerReader`) | `src/reference/managers/` |
+| `reference.market_calendar` | `MarketCalendarManager` | `src/reference/managers/` |
+| `reference.adjustment_factors` | `AdjustmentFactorManager` | `src/reference/managers/` |
+| `control.ingestion_watermark` | `WatermarkManager` (move from `src/bronze/writers/`) | `src/control/watermark/` |
+| `control.ingestion_command` | `IngestionCommandProcessor` | `src/control/jobs/` |
+| `control.ingestion_batch_config` | Read directly by `BronzeIngestionJob.run()` | — |
+| `control.job_run_log` | Written by `BronzeIngestionJob` per ticker | — |
+
+---
+
+## 7. Databricks Job
 
 ```yaml
 job_name:   "[dev handh_stocks] [dev] Bronze Daily Ingestion"
@@ -225,7 +347,7 @@ smoke_test_params:
 
 ---
 
-## 7. Smoke Test Results
+## 8. Smoke Test Results
 
 ### Run 1 — 2026-06-22 (Yahoo — stale cached notebook, invalid)
 Wrote 2,636 SPY records with `source=yahoo`. Tables were truncated 2026-06-25.
@@ -252,7 +374,44 @@ IBKRProvider maps the INITIAL_LOAD request to ~1 month. This is OQ-1 — pre-exi
 
 ---
 
-## 8. Known Issues & Technical Debt
+## 9. Architecture Improvement Backlog (from review 2026-06-26)
+
+Implement one at a time. Do NOT do all at once.
+Full review doc: `TradeAnalytics — ML Trading Pipeline/Architecture_Review_2026_06.md`
+
+| # | Issue | Fix | Priority | Status |
+|---|---|---|---|---|
+| AR-1 | `MarketDataProvider` ABC forces all providers to implement options + realtime even if unsupported (ISP violation) | Split into `HistoricalDataProvider`, `RealTimeProvider`, `OptionsProvider` ABCs | Phase 2.5 | ⬜ Not started |
+| AR-2 | Hardcoded US holiday calendar (150 lines) in `ingestion_planner.py` — breaks for any non-US market or crypto | `TradingCalendar` ABC + `USEquityCalendar` impl, inject into `IngestionPlanner` | Phase 2.5 | ✅ Done |
+| AR-3 | No ABC behind `TickerReader` — Phase 2.5 CSV→Delta migration requires changing `BronzeIngestionJob` imports | `UniverseReader` ABC + `InstrumentInfo` model; `TickerReader` implements it | Phase 2.5 | ✅ Done |
+| AR-4 | No ABC behind `WatermarkManager` — migration to `control` schema requires changing call sites | `WatermarkStore` ABC in `src/shared/base/`; both implementations implement it | Phase 2.5 | ⬜ Not started |
+| AR-5 | `BronzeWriter.write_batch()` receives `stream_cfg` config object — storage layer knows about config structure | Pass resolved table names (`main_table`, `rejected_table`) not the config object | Phase 2.5 | ⬜ Not started |
+| AR-6 | `DataQualityValidator._compute_completeness()` hardcodes equity OHLCV field lists — breaks for FX/futures/crypto | `CompletenessCalculator` ABC, inject asset-class-specific impl | Phase 3 | ⬜ Not started |
+| AR-7 | `_get_pipeline_version()` uses `subprocess.run(git)` — returns "unknown" on Databricks clusters | Read `PIPELINE_VERSION` env var set by DABs; git fallback for local only | Phase 2.5 | ⬜ Not started |
+| AR-8 | Provider output contract is a docstring, not enforced — field name typos surface as Spark errors | `OHLCVRecord` TypedDict; providers return `List[OHLCVRecord]` | Phase 3 | ⬜ Not started |
+| AR-9 | `IngestionPlanner.plan()` if-cascade — adding ingestion modes from `ingestion_command` table will make it unmaintainable | Strategy pattern: one `PlanStrategy` class per mode, ordered list | Phase 3 | ⬜ Not started |
+
+### src/shared/ layer (target structure)
+```
+src/shared/
+├── config/config_loader.py        ← exists
+├── base/                          ← NEW ABCs
+│   ├── data_provider.py           ← HistoricalDataProvider, RealTimeProvider, OptionsProvider (AR-1)
+│   ├── universe_reader.py         ← UniverseReader + InstrumentInfo (AR-3) ✅
+│   ├── watermark_store.py         ← WatermarkStore (AR-4)
+│   ├── trading_calendar.py        ← TradingCalendar (AR-2) ✅
+│   └── completeness_calculator.py ← CompletenessCalculator (AR-6)
+├── calendar/
+│   ├── us_equity_calendar.py      ← moved from ingestion_planner.py (AR-2) ✅
+│   ├── exchange_calendars_calendar.py ← Phase 3
+│   └── always_open_calendar.py    ← Crypto/FX
+└── models/
+    └── ohlcv_record.py            ← OHLCVRecord TypedDict (AR-8)
+```
+
+---
+
+## 10. Known Issues & Technical Debt
 
 ### ⚠️ Date range override not working (investigate before next smoke test)
 `start_date`/`end_date` params passed to `job.run()` but IBKR returned full 10yr
@@ -273,18 +432,25 @@ IBKR provider sets `ingested_by="ibkr_provider_v1"` on raw records but field arr
 as NULL in Delta. `validator._enrich_record()` uses `enriched.get("ingested_by", None)`
 which should preserve the value. Investigate whether it's being overwritten somewhere.
 
+### Phase 2.5 Technical Debt (fix before Phase 3)
+1. **`WatermarkManager` reads/writes `symbol` as key** — must be migrated to `instrument_id` when control tables are built. Currently in `src/bronze/writers/watermark_manager.py`, will move to `src/control/watermark/`.
+2. **`TickerReader` reads from CSV** — replace with `TickerFeedConfigManager` reading from `reference.ticker_feed_config` Delta table.
+3. **`IngestionPlanner` reads from YAML** — replace desired state reads with `ticker_feed_config` Delta table reads.
+4. **`market_calendar`** — replace hardcoded 2010–2040 holiday list with `reference.market_calendar` table driven by `exchange_calendars` Python library.
+
 ### Phase 3 Technical Debt (fix during Phase 3)
 1. **BronzeRecord not instantiated** — records flow as dicts, all defaults bypassed.
    Real fix: `validator` creates `BronzeRecord.from_dict()` → typed `to_dict()` output.
    Removes need for manual type alignment in `_spark_append()` (560 lines → 3 lines).
 2. **`_process_ticker()` too long** (~150 lines) — split before adding Phase 4 hooks.
 3. **`provider_nullable_fields`** in `daily.yml` not consumed by validator — wire up.
-4. **Holiday calendar** — migrate to `tradeanalytics.reference.market_holidays` Delta table.
-5. **`additional_rules`** in config — verify RuleEngine handles list-of-dicts correctly.
+4. **`additional_rules`** in config — verify RuleEngine handles list-of-dicts correctly.
+5. **Spike/flash crash DQ rule missing** — add rolling volatility filter to `data_quality_rules.yml`: flag bars where |close_t - close_t-1| / close_t-1 > N × σ_rolling.
+6. **`adjustment_factors` table needed before feature engineering** — adjusted close is a feature input; raw close on split dates will produce artificial jumps in features.
 
 ---
 
-## 9. Config Key Reference
+## 10. Config Key Reference
 
 ```python
 config.databricks.catalog          # "tradeanalytics"
@@ -300,7 +466,7 @@ config.daily.intervals             # ["1d"]
 
 ---
 
-## 10. Delta Tables
+## 11. Delta Tables
 
 | Table | Full Name | Records |
 |-------|-----------|---------|
@@ -312,7 +478,7 @@ S3: `s3://handh-trade-refined-use1/bronze/`
 
 ---
 
-## 11. Phase 3 Preview (Silver — Feature Engineering)
+## 12. Phase 3 Preview (Silver — Feature Engineering)
 
 Step-by-step teaching order:
 1. What is a feature? (EMA, RSI, MACD on real SPY data — visualise first)
@@ -327,13 +493,24 @@ Feature store: `tradeanalytics.feature_store.*`
 
 ---
 
-## 12. Session Start Checklist
+## 13. Session Start Checklist
 
 1. Upload this `CLAUDE.md` file first
 2. Confirm: any changes since last session?
-3. Run `python -m pytest tests/ -q` — confirm 249 tests passing
+3. Run `python -m pytest tests/ -q` — confirm 249 tests passing (on branch `feature/phase3-restructure`)
 4. State the immediate task
-5. **Next up:** Phase 2 docs → PR → merge → Phase 3
+5. **Next up (Phase 2.5 — in order):**
+   - Create `tradeanalytics.reference` and `tradeanalytics.control` schemas in Unity Catalog
+   - Build seed notebook for `reference.instrument`, `reference.instrument_listing`, `reference.universe_membership` (on-demand only, no DABs schedule)
+   - Build `reference.ticker_feed_config` and seed with current 8 instruments
+   - Build `reference.market_calendar` (using `exchange_calendars` library)
+   - Build `control.ingestion_watermark` (new schema, replaces `bronze.ingestion_watermark_daily`)
+   - Build `control.ingestion_batch_config`, `control.ingestion_command`, `control.job_run_log`
+   - Migrate `WatermarkManager` from `src/bronze/writers/` → `src/control/watermark/`
+   - Replace `TickerReader` with `TickerFeedConfigManager` reading from Delta
+   - Update `IngestionPlanner` to use new table-driven desired/actual state reconciliation
+   - PR and merge `feature/phase3-restructure` → `main`
+   - Then start Phase 3 (Silver — feature engineering, step-by-step teaching)
 ## Project State — June 2026
 
 ---
@@ -483,11 +660,11 @@ XGBoost/LightGBM/Random Forest are mandatory first choices for all model cluster
 - DABs skeleton merged to main (`feature/phase1-dabs-skeleton`)
 - Databricks CLI v1.4.0, profile `handh-trade-aws`
 
-#### Phase 2 — Bronze Data Ingestion (Code complete; smoke test run with wrong source)
+#### Phase 2 — Bronze Data Ingestion ✅ COMPLETE
 
-**Branch:** `feature/phase2-data-ingestion`
+**Branch:** Merged to `main` via PR #6 on 2026-06-25
 **Tests:** 249 passing
-**Status:** Code complete. Deployment done. Smoke test succeeded but with wrong data source — a stale cached notebook with a Yahoo override ran instead of the current notebook, writing 2,636 SPY records with `source=yahoo` and `pipeline_version=unknown` to `tradeanalytics.bronze.market_data_daily`.
+**Status:** Complete. IBKR smoke test confirmed — 29 SPY records, source=ibkr, 2026-05-13→2026-06-24.
 
 **What is built:**
 - `IBKRProvider` and `YahooProvider` implementing `MarketDataProvider` ABC
@@ -507,20 +684,31 @@ XGBoost/LightGBM/Random Forest are mandatory first choices for all model cluster
 - Holiday calendar expanded from 2026-only to 2010–2040
 - Yahoo provider override in notebook (`config._data` mutation) — removed in current notebook but stale cached version caused the smoke test issue
 
-**Immediate next steps before Phase 2 can be closed (in order):**
-1. TRUNCATE `tradeanalytics.bronze.market_data_daily` and `ingestion_watermark_daily` (Yahoo data is not production)
-2. Verify deployed notebook in Databricks has no Yahoo override
-3. Re-run smoke test with IBKR as primary — confirm `source=ibkr` in results
-4. Create `TradeAnalytics_Phase2_Data_Ingestion_Guide.docx`
-5. Merge `feature/phase2-data-ingestion` → `main` via PR
+#### Phase 2.5 — Pre-Phase 3 Restructure 🔄 IN PROGRESS
 
-**Known open design issue — `start_date`/`end_date` widget parameters:**
-Widget parameters passed to `job.run()` did not prevent `INITIAL_LOAD` mode — IBKR returned full 10-year history instead of 2 days. Recommended fix is Option A: post-fetch Python filtering in `IBKRProvider` before data is passed to the pipeline. This has been designed but not yet implemented.
+**Branch:** `feature/phase3-restructure`
+**Status:** Folder restructure done, all imports updated, 249 tests passing. Table architecture designed. Code not yet written.
 
-#### CLAUDE.md
+**What is done:**
+- `src/ingestion/` → `src/bronze/` (all imports updated)
+- `src/config/` → `src/shared/config/` (all imports updated)
+- `src/ingestion/readers/` → `src/reference/managers/`
+- `src/reference/seed/` — CSV/YAML bootstrap files (not source of truth)
+- Placeholder `__init__.py` structure for silver/, gold/, control/, api/, execution/, llm/
+- `tests/ingestion/` → `tests/bronze/`, `tests/config/` → `tests/shared/config/`
+- `notebooks/` → `notebooks/bronze/` (path updated in `databricks.yml`)
+- Full reference & control table architecture designed (see Section 6)
 
-`CLAUDE.md` exists in the repo root on `feature/phase2-data-ingestion`. It is the canonical session-start context document for Claude Code. Raw URL:
-`https://raw.githubusercontent.com/hemachandra-menakuru/tradeanalytics/feature/phase2-data-ingestion/CLAUDE.md`
+**What is NOT yet done (next Claude Code session):**
+- Create `tradeanalytics.reference` and `tradeanalytics.control` Unity Catalog schemas
+- Build and seed all reference and control Delta tables
+- Migrate `WatermarkManager` to `src/control/watermark/` with `instrument_id` as key
+- Replace `TickerReader` (CSV) with `TickerFeedConfigManager` (Delta)
+- Update `IngestionPlanner` to table-driven desired/actual state reconciliation
+- PR and merge to `main`
+
+**Open design issue OQ-1 (carried forward):**
+`start_date`/`end_date` widget params do not constrain IBKR fetch. Option A (post-fetch Python filter in IBKRProvider) still recommended. Will be naturally resolved when IngestionPlanner is rewritten to use `ticker_feed_config` table — the desired date range comes from the table, not widget params.
 
 Git pager permanently disabled: `git config --global core.pager cat`
 
@@ -694,17 +882,22 @@ All modes support `symbols:[]` scoping. Watermark tracks `earliest_date` + `late
 
 #### 5.7 Repository Structure (Local)
 
+See Section 4 for full structure. Active branch: `feature/phase3-restructure`.
+
 ```
 /Users/hemachandra/projects/tradeanalytics   — local repo root
-├── CLAUDE.md                                — canonical session-start context (Claude Code reads this first)
-├── databricks.yml                           — DABs pipeline definition
-├── src/                                     — all Python source
-│   ├── ingestion/                           — Phase 2 components
-│   ├── reference/                           — data_quality_rules.yml
-│   └── ...
-├── config/                                  — all YAML config
-├── tests/                                   — pytest suite (249 passing)
-└── notebooks/                              — Databricks notebooks
+├── CLAUDE.md                                — canonical session-start context
+├── databricks.yml                           — DABs pipeline (job ID: 174217366433843)
+├── src/
+│   ├── shared/config/config_loader.py       — ConfigLoader (was src/config/)
+│   ├── bronze/                              — Phase 2 ingestion (was src/ingestion/)
+│   ├── reference/managers/ + seed/          — TickerReader + CSV seeds
+│   ├── control/                             — Phase 2.5 (watermark, command processor)
+│   ├── silver/                              — Phase 3 (empty placeholder)
+│   └── gold/                               — Phase 4 (empty placeholder)
+├── config/                                  — YAML config files
+├── tests/bronze/ + shared/config/ + reference/  — pytest suite (249 passing)
+└── notebooks/bronze/                        — Databricks notebooks
 ```
 
 GitHub: `hemachandra-menakuru/tradeanalytics` (public)
