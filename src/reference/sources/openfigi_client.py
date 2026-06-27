@@ -34,7 +34,8 @@ from src.reference.sources.universe_source import RawInstrument
 logger = logging.getLogger(__name__)
 
 _OPENFIGI_URL   = "https://api.openfigi.com/v3/mapping"
-_BATCH_SIZE     = 100       # OpenFIGI max per request
+_BATCH_SIZE_NO_KEY  = 10    # OpenFIGI limit without API key
+_BATCH_SIZE_WITH_KEY = 100  # OpenFIGI limit with API key
 _RATE_LIMIT_RPS = 4         # 250/min without key → ~4/sec conservatively
 _RETRY_ATTEMPTS = 3
 _RETRY_DELAY    = 5         # seconds
@@ -44,7 +45,7 @@ class OpenFigiClient:
     """
     Enriches RawInstrument objects with FIGI + ISIN from OpenFIGI API.
 
-    Processes in batches of 100 (API limit).
+    Processes in batches of 10 (no API key) or 100 (with API key).
     Rate-limited to stay within free tier (250 req/min).
     Instruments not found in OpenFIGI are returned unchanged (no FIGI/ISIN).
     """
@@ -74,9 +75,10 @@ class OpenFigiClient:
         Returns:
             Same list with figi/isin/exchange_mic populated where found.
         """
+        batch_size = _BATCH_SIZE_WITH_KEY if self._api_key else _BATCH_SIZE_NO_KEY
         logger.info(
             f"OpenFigiClient: enriching {len(instruments)} instruments "
-            f"(batches of {_BATCH_SIZE})"
+            f"(batches of {batch_size}, {'with' if self._api_key else 'no'} API key)"
         )
 
         # Build lookup: symbol → instrument (for updating in-place)
@@ -88,8 +90,8 @@ class OpenFigiClient:
         enriched  = 0
         not_found = 0
 
-        for batch_start in range(0, total, _BATCH_SIZE):
-            batch_symbols = symbols[batch_start:batch_start + _BATCH_SIZE]
+        for batch_start in range(0, total, batch_size):
+            batch_symbols = symbols[batch_start:batch_start + batch_size]
             results       = self._query_batch(batch_symbols)
 
             for symbol, result in results.items():
@@ -102,7 +104,7 @@ class OpenFigiClient:
                     not_found += 1
 
             # Rate limiting — stay within free tier
-            if batch_start + _BATCH_SIZE < total:
+            if batch_start + batch_size < total:
                 time.sleep(1.0 / _RATE_LIMIT_RPS)
 
         logger.info(
