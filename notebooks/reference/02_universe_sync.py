@@ -642,6 +642,13 @@ if not DRY_RUN:
         StructField("created_by",        StringType(),    True),
     ])
 
+    # Debug: confirm SPY/QQQ resolution before feed config loop
+    for dbg_sym in ["SPY", "QQQ"]:
+        in_existing    = dbg_sym in existing
+        resolved_id    = symbol_to_id.get(dbg_sym)
+        already_config = resolved_id in existing_configs if resolved_id else False
+        print(f"DEBUG {dbg_sym}: in_existing={in_existing}  instrument_id={resolved_id}  already_in_feed_config={already_config}")
+
     feed_rows = []
     missing   = []
     for item in ACTIVE_INSTRUMENTS:
