@@ -634,11 +634,11 @@ if not DRY_RUN:
                 spark.sql(f"""
                     INSERT INTO {CATALOG}.reference.instrument_listing
                         (instrument_id, symbol, company_name, exchange, exchange_mic, currency,
-                         is_current, valid_from, created_at, updated_at)
+                         is_current, valid_from, created_at)
                     VALUES
                         ({etf_instrument_id}, '{etf["symbol"]}', '{etf["company_name"]}',
                          '{etf["exchange"]}', '{etf["exchange_mic"]}', 'USD',
-                         true, current_date(), current_timestamp(), current_timestamp())
+                         true, current_date(), current_timestamp())
                 """)
 
                 logger.info(f"Seeded {etf['symbol']} → instrument_id={etf_instrument_id}")
