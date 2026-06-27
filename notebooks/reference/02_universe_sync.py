@@ -143,18 +143,21 @@ def save_to_s3(content: str, key: str) -> None:
         logger.info(f"DRY RUN — would save to s3://{RAW_BUCKET}/{key}")
 
 def save_bytes_to_s3(content: bytes, key: str) -> None:
-    """Save raw binary content to S3 via Spark Hadoop FS API."""
+    """Save raw binary content to S3.
+    Writes to /tmp first then uses dbutils.fs.cp() through Unity Catalog
+    credential vending — avoids JVM FileSystem cache holding stale credentials.
+    """
     if not DRY_RUN:
-        path = f"s3://{RAW_BUCKET}/{key}"
-        jvm  = spark._jvm
-        conf = spark._jsc.hadoopConfiguration()
-        fs   = jvm.org.apache.hadoop.fs.FileSystem.get(
-            jvm.java.net.URI.create(path), conf
-        )
-        out = fs.create(jvm.org.apache.hadoop.fs.Path(path), True)
-        out.write(content)
-        out.close()
-        logger.info(f"Saved to {path}")
+        import tempfile, os
+        s3_path = f"s3://{RAW_BUCKET}/{key}"
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+        try:
+            dbutils.fs.cp(f"file:{tmp_path}", s3_path)
+            logger.info(f"Saved to {s3_path}")
+        finally:
+            os.unlink(tmp_path)
     else:
         logger.info(f"DRY RUN — would save to s3://{RAW_BUCKET}/{key}")
 
