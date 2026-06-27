@@ -134,27 +134,33 @@ from src.reference.sources.nasdaq_ftp_source import NasdaqFtpSource
 from src.reference.sources.etf_holdings_source import EtfHoldingsSource
 
 def save_to_s3(content: str, key: str) -> None:
-    """Save raw text content to S3 via Unity Catalog external location (dbutils.fs)."""
+    """Save raw text content to S3. Best-effort — failures are logged but do not stop the job."""
     if not DRY_RUN:
         path = f"s3://{RAW_BUCKET}/{key}"
-        dbutils.fs.put(path, content, overwrite=True)
-        logger.info(f"Saved to {path}")
+        try:
+            dbutils.fs.put(path, content, overwrite=True)
+            logger.info(f"Saved to {path}")
+        except Exception as e:
+            logger.warning(f"S3 save skipped ({key}): {e}")
     else:
         logger.info(f"DRY RUN — would save to s3://{RAW_BUCKET}/{key}")
 
 def save_bytes_to_s3(content: bytes, key: str) -> None:
-    """Save raw binary content (e.g. xlsx) to S3 via Spark Hadoop FS API."""
+    """Save raw binary content to S3. Best-effort — failures are logged but do not stop the job."""
     if not DRY_RUN:
         path = f"s3://{RAW_BUCKET}/{key}"
-        jvm  = spark._jvm
-        conf = spark._jsc.hadoopConfiguration()
-        fs   = jvm.org.apache.hadoop.fs.FileSystem.get(
-            jvm.java.net.URI.create(path), conf
-        )
-        out = fs.create(jvm.org.apache.hadoop.fs.Path(path), True)  # overwrite=True
-        out.write(content)
-        out.close()
-        logger.info(f"Saved to {path}")
+        try:
+            jvm  = spark._jvm
+            conf = spark._jsc.hadoopConfiguration()
+            fs   = jvm.org.apache.hadoop.fs.FileSystem.get(
+                jvm.java.net.URI.create(path), conf
+            )
+            out = fs.create(jvm.org.apache.hadoop.fs.Path(path), True)
+            out.write(content)
+            out.close()
+            logger.info(f"Saved to {path}")
+        except Exception as e:
+            logger.warning(f"S3 save skipped ({key}): {e}")
     else:
         logger.info(f"DRY RUN — would save to s3://{RAW_BUCKET}/{key}")
 
@@ -179,8 +185,8 @@ for etf_symbol, url, fmt in [
             etf_raw_texts[etf_symbol] = resp.text
         logger.info(f"{etf_symbol} holdings downloaded ({len(resp.content):,} bytes)")
     except Exception as e:
-        logger.error(f"Failed to download or save {etf_symbol} holdings: {e}", exc_info=True)
-        raise
+        logger.warning(f"Failed to download or save {etf_symbol} holdings: {e}")
+        logger.warning("S3 raw file save skipped — Delta writes will continue")
 
 # Parse ETF holdings via our existing source client
 etf_source      = EtfHoldingsSource()
