@@ -556,9 +556,6 @@ elif DRY_RUN:
 
 # COMMAND ----------
 
-# VERSION CHECK — if you see this line the notebook is up to date (fix: direct ETF insert v2)
-print("Cell 11 version: direct-etf-insert-v2")
-
 # Our 8 active instruments with their ingestion preferences
 ACTIVE_INSTRUMENTS = [
     {"symbol": "AAPL",  "history_start": "2016-01-01", "batch_group": "A", "priority": 1},
