@@ -18,7 +18,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install requests openpyxl boto3 --quiet
+# MAGIC %pip install requests openpyxl --quiet
 
 # COMMAND ----------
 
@@ -59,7 +59,6 @@ if SKIP_IBKR:
 
 import sys
 import logging
-import boto3
 from datetime import date, datetime, timezone
 from typing import Dict, List
 
@@ -134,13 +133,28 @@ print(f"Existing instruments in Delta: {len(existing)}")
 from src.reference.sources.nasdaq_ftp_source import NasdaqFtpSource
 from src.reference.sources.etf_holdings_source import EtfHoldingsSource
 
-s3 = boto3.client("s3", region_name="us-east-1")
-
 def save_to_s3(content: str, key: str) -> None:
-    """Save raw text content to S3 for audit + replay."""
+    """Save raw text content to S3 via Unity Catalog external location (dbutils.fs)."""
     if not DRY_RUN:
-        s3.put_object(Bucket=RAW_BUCKET, Key=key, Body=content.encode("utf-8"))
-        logger.info(f"Saved to s3://{RAW_BUCKET}/{key}")
+        path = f"s3://{RAW_BUCKET}/{key}"
+        dbutils.fs.put(path, content, overwrite=True)
+        logger.info(f"Saved to {path}")
+    else:
+        logger.info(f"DRY RUN — would save to s3://{RAW_BUCKET}/{key}")
+
+def save_bytes_to_s3(content: bytes, key: str) -> None:
+    """Save raw binary content (e.g. xlsx) to S3 via Spark Hadoop FS API."""
+    if not DRY_RUN:
+        path = f"s3://{RAW_BUCKET}/{key}"
+        jvm  = spark._jvm
+        conf = spark._jsc.hadoopConfiguration()
+        fs   = jvm.org.apache.hadoop.fs.FileSystem.get(
+            jvm.java.net.URI.create(path), conf
+        )
+        out = fs.create(jvm.org.apache.hadoop.fs.Path(path), True)  # overwrite=True
+        out.write(content)
+        out.close()
+        logger.info(f"Saved to {path}")
     else:
         logger.info(f"DRY RUN — would save to s3://{RAW_BUCKET}/{key}")
 
@@ -157,8 +171,7 @@ for etf_symbol, url, fmt in [
         resp.raise_for_status()
         if fmt == "xlsx":
             key = f"reference/etf_holdings/{TODAY.strftime('%Y-%m-%d')}/{etf_symbol.lower()}_holdings.xlsx"
-            if not DRY_RUN:
-                s3.put_object(Bucket=RAW_BUCKET, Key=key, Body=resp.content)
+            save_bytes_to_s3(resp.content, key)
             etf_raw_texts[etf_symbol] = resp.content   # bytes for xlsx
         else:
             key = f"reference/etf_holdings/{TODAY.strftime('%Y-%m-%d')}/{etf_symbol.lower()}_holdings.csv"
