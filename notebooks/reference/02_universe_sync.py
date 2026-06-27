@@ -11,8 +11,8 @@
 # MAGIC 5. Seeds reference.ticker_feed_config for our active instruments
 # MAGIC
 # MAGIC **Widgets:**
-# MAGIC - `dry_run`      — true = preview changes, no writes (default: true)
-# MAGIC - `etf_only`     — true = skip NASDAQ FTP, only sync ETF universe
+# MAGIC - `dry_run`      — true = preview changes, no writes (default: false)
+# MAGIC - `etf_only`     — true = skip NASDAQ FTP, only sync ETF universe (default: true)
 # MAGIC - `skip_ibkr`    — true = skip IBKR con_id enrichment (default: true — gateway not reachable from cloud)
 # MAGIC - OpenFIGI API key is read automatically from Databricks Secrets (`tradeanalytics/openfigi-api-key`)
 
@@ -30,8 +30,8 @@ dbutils.library.restartPython()
 
 # COMMAND ----------
 
-dbutils.widgets.dropdown("dry_run",    "true",  ["true", "false"], "Dry Run")
-dbutils.widgets.dropdown("etf_only",  "false", ["true", "false"], "ETF Only (skip NASDAQ FTP)")
+dbutils.widgets.dropdown("dry_run",    "false", ["true", "false"], "Dry Run")
+dbutils.widgets.dropdown("etf_only",  "true",  ["true", "false"], "ETF Only (skip NASDAQ FTP)")
 dbutils.widgets.dropdown("skip_ibkr", "true",  ["true", "false"], "Skip IBKR Enrichment")
 
 DRY_RUN   = dbutils.widgets.get("dry_run")   == "true"
@@ -587,35 +587,79 @@ if not DRY_RUN:
             """)
             logger.info(f"Corrected {etf['symbol']} asset_class to {etf['asset_class']}")
 
-    # Ensure SPY/QQQ are in new_listings if not already in Delta
+    # If SPY/QQQ are not in Delta at all, insert them directly into instrument + listing now.
+    # Cells 8/9 already ran so we cannot use new_listings — do a targeted insert here instead.
     for etf in ETF_INSTRUMENTS:
-        if etf["symbol"] not in existing and not any(r.get("symbol") == etf["symbol"] for r in new_listings):
-            new_listings.append({
-                "symbol":       etf["symbol"],
-                "company_name": etf["company_name"],
-                "asset_class":  etf["asset_class"],
-                "exchange":     etf["exchange"],
-                "exchange_mic": etf["exchange_mic"],
-                "currency":     "USD",
-                "isin":         None,
-                "figi":         None,
-                "ibkr_con_id":  None,
-            })
-            logger.info(f"Added {etf['symbol']} as explicit ETF seed instrument")
+        if etf["symbol"] not in existing:
+            # Use a per-symbol source tag so we can recover the identity-assigned instrument_id.
+            # The tag must be unique to this symbol so LIMIT 1 reliably returns only our row.
+            etf_source_tag = f"{SYNC_BATCH}__{etf['symbol']}"
+
+            try:
+                # Step 1 — insert into reference.instrument.
+                # Delta assigns instrument_id via GENERATED ALWAYS AS IDENTITY — we cannot supply it.
+                spark.sql(f"""
+                    INSERT INTO {CATALOG}.reference.instrument
+                        (asset_class, is_active, ibkr_con_id, isin, figi, source, created_at, updated_at)
+                    VALUES
+                        ('{etf["asset_class"]}', true, NULL, NULL, NULL,
+                         '{etf_source_tag}', current_timestamp(), current_timestamp())
+                """)
+
+                # Step 2 — recover the instrument_id Delta assigned.
+                # We tagged with a unique source string so this SELECT is unambiguous.
+                rows = spark.sql(f"""
+                    SELECT instrument_id FROM {CATALOG}.reference.instrument
+                    WHERE source = '{etf_source_tag}'
+                    LIMIT 1
+                """).collect()
+
+                if not rows:
+                    logger.error(
+                        f"ETF seed failed: inserted {etf['symbol']} into reference.instrument "
+                        f"but could not recover instrument_id (source tag: {etf_source_tag}). "
+                        f"Re-run the notebook to retry."
+                    )
+                    continue
+
+                etf_instrument_id = rows[0]["instrument_id"]
+
+                # Step 3 — insert into reference.instrument_listing.
+                # If this fails the instrument row exists without a listing — harmless but visible.
+                # The next run will find it in existing (via the SYNC_BATCH LIKE query) and skip
+                # the instrument insert, then retry only the listing insert.
+                spark.sql(f"""
+                    INSERT INTO {CATALOG}.reference.instrument_listing
+                        (instrument_id, symbol, company_name, exchange, exchange_mic, currency,
+                         is_current, valid_from, created_at, updated_at)
+                    VALUES
+                        ({etf_instrument_id}, '{etf["symbol"]}', '{etf["company_name"]}',
+                         '{etf["exchange"]}', '{etf["exchange_mic"]}', 'USD',
+                         true, current_date(), current_timestamp(), current_timestamp())
+                """)
+
+                logger.info(f"Seeded {etf['symbol']} → instrument_id={etf_instrument_id}")
+
+            except Exception as e:
+                logger.error(
+                    f"ETF seed failed for {etf['symbol']}: {e}. "
+                    f"Re-run the notebook — the instrument row may already exist so "
+                    f"the next run will only retry the listing insert."
+                )
 
     # Build symbol → instrument_id map (need it for FK)
     symbol_to_id: Dict[str, int] = {sym: row["instrument_id"] for sym, row in existing.items()}
 
-    if new_listings:
-        inserted_df = spark.sql(f"""
-            SELECT i.instrument_id, l.symbol
-            FROM {CATALOG}.reference.instrument i
-            JOIN {CATALOG}.reference.instrument_listing l
-              ON i.instrument_id = l.instrument_id AND l.is_current = true
-            WHERE i.source = '{SYNC_BATCH}'
-        """)
-        for row in inserted_df.collect():
-            symbol_to_id[row["symbol"]] = row["instrument_id"]
+    # Cover both main batch (source = SYNC_BATCH) and ETF explicit seeds (source = SYNC_BATCH__SYM)
+    inserted_df = spark.sql(f"""
+        SELECT i.instrument_id, l.symbol
+        FROM {CATALOG}.reference.instrument i
+        JOIN {CATALOG}.reference.instrument_listing l
+          ON i.instrument_id = l.instrument_id AND l.is_current = true
+        WHERE i.source LIKE '{SYNC_BATCH}%'
+    """)
+    for row in inserted_df.collect():
+        symbol_to_id[row["symbol"]] = row["instrument_id"]
 
     # Existing ticker_feed_config entries (skip if already seeded)
     existing_configs = set()
@@ -641,13 +685,6 @@ if not DRY_RUN:
         StructField("updated_at",        TimestampType(), False),
         StructField("created_by",        StringType(),    True),
     ])
-
-    # Debug: confirm SPY/QQQ resolution before feed config loop
-    for dbg_sym in ["SPY", "QQQ"]:
-        in_existing    = dbg_sym in existing
-        resolved_id    = symbol_to_id.get(dbg_sym)
-        already_config = resolved_id in existing_configs if resolved_id else False
-        print(f"DEBUG {dbg_sym}: in_existing={in_existing}  instrument_id={resolved_id}  already_in_feed_config={already_config}")
 
     feed_rows = []
     missing   = []
