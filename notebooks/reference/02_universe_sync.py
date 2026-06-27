@@ -134,7 +134,7 @@ print(f"Existing instruments in Delta: {len(existing)}")
 from src.reference.sources.nasdaq_ftp_source import NasdaqFtpSource
 from src.reference.sources.etf_holdings_source import EtfHoldingsSource
 
-s3 = boto3.client("s3")
+s3 = boto3.client("s3", region_name="us-east-1")
 
 def save_to_s3(content: str, key: str) -> None:
     """Save raw text content to S3 for audit + replay."""
@@ -166,7 +166,8 @@ for etf_symbol, url, fmt in [
             etf_raw_texts[etf_symbol] = resp.text
         logger.info(f"{etf_symbol} holdings downloaded ({len(resp.content):,} bytes)")
     except Exception as e:
-        logger.error(f"Failed to download {etf_symbol} holdings: {e}")
+        logger.error(f"Failed to download or save {etf_symbol} holdings: {e}", exc_info=True)
+        raise
 
 # Parse ETF holdings via our existing source client
 etf_source      = EtfHoldingsSource()
