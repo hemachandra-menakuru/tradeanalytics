@@ -65,7 +65,7 @@ from typing import Dict, List
 
 from pyspark.sql.types import (
     StructType, StructField,
-    StringType, BooleanType, LongType, DoubleType, DateType, TimestampType
+    StringType, BooleanType, IntegerType, LongType, DoubleType, DateType, TimestampType
 )
 
 sys.path.insert(0, "/Workspace/Repos/hemachandra-menakuru/tradeanalytics")
@@ -578,17 +578,17 @@ if not DRY_RUN:
         pass
 
     feed_schema = StructType([
-        StructField("instrument_id",     LongType(),    False),
-        StructField("stream",            StringType(),  False),
-        StructField("target_start_date", DateType(),    False),
-        StructField("run_frequency",     StringType(),  False),
-        StructField("batch_group",       StringType(),  False),
-        StructField("priority",          LongType(),    False),
-        StructField("is_active",         BooleanType(), False),
-        StructField("max_lookback_days", LongType(),    False),
+        StructField("instrument_id",     LongType(),      False),
+        StructField("stream",            StringType(),    False),
+        StructField("target_start_date", DateType(),      False),
+        StructField("run_frequency",     StringType(),    False),
+        StructField("batch_group",       StringType(),    False),
+        StructField("priority",          IntegerType(),   False),
+        StructField("is_active",         BooleanType(),   False),
+        StructField("max_lookback_days", IntegerType(),   False),
         StructField("created_at",        TimestampType(), False),
         StructField("updated_at",        TimestampType(), False),
-        StructField("created_by",        StringType(),  True),
+        StructField("created_by",        StringType(),    True),
     ])
 
     feed_rows = []
