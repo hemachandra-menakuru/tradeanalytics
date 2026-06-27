@@ -551,7 +551,41 @@ ACTIVE_INSTRUMENTS = [
     {"symbol": "QQQ",   "history_start": "2016-01-01", "batch_group": "B", "priority": 3},
 ]
 
+# SPY and QQQ are ETFs — they hold other stocks so they never appear as constituents
+# of their own holdings files. Seed them explicitly into reference.instrument as etf asset_class.
+ETF_INSTRUMENTS = [
+    {"symbol": "SPY", "company_name": "SPDR S&P 500 ETF Trust",      "asset_class": "etf", "exchange": "NYSE Arca", "exchange_mic": "ARCX"},
+    {"symbol": "QQQ", "company_name": "Invesco QQQ Trust Series 1",  "asset_class": "etf", "exchange": "NASDAQ",   "exchange_mic": "XNAS"},
+]
+
 if not DRY_RUN:
+    # Correct asset_class for SPY/QQQ if they were previously inserted as 'equity'
+    for etf in ETF_INSTRUMENTS:
+        if etf["symbol"] in existing and existing[etf["symbol"]].get("asset_class") != etf["asset_class"]:
+            instrument_id = existing[etf["symbol"]]["instrument_id"]
+            spark.sql(f"""
+                UPDATE {CATALOG}.reference.instrument
+                SET asset_class = '{etf["asset_class"]}', updated_at = current_timestamp()
+                WHERE instrument_id = {instrument_id}
+            """)
+            logger.info(f"Corrected {etf['symbol']} asset_class to {etf['asset_class']}")
+
+    # Ensure SPY/QQQ are in new_listings if not already in Delta
+    for etf in ETF_INSTRUMENTS:
+        if etf["symbol"] not in existing and not any(r.get("symbol") == etf["symbol"] for r in new_listings):
+            new_listings.append({
+                "symbol":       etf["symbol"],
+                "company_name": etf["company_name"],
+                "asset_class":  etf["asset_class"],
+                "exchange":     etf["exchange"],
+                "exchange_mic": etf["exchange_mic"],
+                "currency":     "USD",
+                "isin":         None,
+                "figi":         None,
+                "ibkr_con_id":  None,
+            })
+            logger.info(f"Added {etf['symbol']} as explicit ETF seed instrument")
+
     # Build symbol → instrument_id map (need it for FK)
     symbol_to_id: Dict[str, int] = {sym: row["instrument_id"] for sym, row in existing.items()}
 
