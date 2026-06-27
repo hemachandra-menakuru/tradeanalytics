@@ -197,8 +197,8 @@ else:
     # Download raw text files first, save to S3, then parse
     import requests as req
     for filename, url in [
-        ("nasdaqlisted.txt",  "https://ftp.nasdaqtrader.com/dynamic/SymbolDirectory/nasdaqlisted.txt"),
-        ("otherlisted.txt",   "https://ftp.nasdaqtrader.com/dynamic/SymbolDirectory/otherlisted.txt"),
+        ("nasdaqlisted.txt",  "http://ftp.nasdaqtrader.com/dynamic/SymbolDirectory/nasdaqlisted.txt"),
+        ("otherlisted.txt",   "http://ftp.nasdaqtrader.com/dynamic/SymbolDirectory/otherlisted.txt"),
     ]:
         try:
             r = req.get(url, timeout=30)

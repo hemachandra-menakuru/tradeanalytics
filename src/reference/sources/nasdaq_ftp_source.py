@@ -35,10 +35,10 @@ logger = logging.getLogger(__name__)
 
 # NASDAQ provides HTTPS mirrors of the FTP files — no FTP client needed
 _NASDAQ_LISTED_URL = (
-    "https://ftp.nasdaqtrader.com/dynamic/SymbolDirectory/nasdaqlisted.txt"
+    "http://ftp.nasdaqtrader.com/dynamic/SymbolDirectory/nasdaqlisted.txt"
 )
 _OTHER_LISTED_URL = (
-    "https://ftp.nasdaqtrader.com/dynamic/SymbolDirectory/otherlisted.txt"
+    "http://ftp.nasdaqtrader.com/dynamic/SymbolDirectory/otherlisted.txt"
 )
 
 # Exchange code → ISO 10383 MIC mapping (from otherlisted.txt Exchange column)
