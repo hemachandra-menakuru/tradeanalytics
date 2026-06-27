@@ -22,6 +22,10 @@
 
 # COMMAND ----------
 
+dbutils.library.restartPython()
+
+# COMMAND ----------
+
 # MAGIC %md ## Cell 1 — Widgets
 
 # COMMAND ----------
@@ -403,11 +407,12 @@ if not DRY_RUN and new_listings:
         # Look up instrument_id by (isin, figi) — primary join keys
         instrument_id = inserted_rows.get((item["isin"], item["figi"]))
 
-        # Fallback: try isin-only or figi-only if one is None
+        # Fallback chain: two separate `if` checks (NOT elif) so each level
+        # independently retries if the previous attempt returned None
         if instrument_id is None:
-            instrument_id = inserted_rows.get((item["isin"], None))
+            instrument_id = inserted_rows.get((item["isin"], None))   # isin only — figi was None
         if instrument_id is None:
-            instrument_id = inserted_rows.get((None, item["figi"]))
+            instrument_id = inserted_rows.get((None, item["figi"]))   # figi only — isin was None
 
         if instrument_id is None:
             logger.warning(f"Could not recover instrument_id for {item['symbol']} (isin={item['isin']}, figi={item['figi']}) — skipping listing")
