@@ -14,7 +14,7 @@
 # MAGIC - `dry_run`      — true = preview changes, no writes (default: true)
 # MAGIC - `etf_only`     — true = skip NASDAQ FTP, only sync ETF universe
 # MAGIC - `skip_ibkr`    — true = skip IBKR con_id enrichment (default: true — gateway not reachable from cloud)
-# MAGIC - `openfigi_key` — optional OpenFIGI API key for higher rate limits
+# MAGIC - OpenFIGI API key is read automatically from Databricks Secrets (`tradeanalytics/openfigi-api-key`)
 
 # COMMAND ----------
 
@@ -30,15 +30,20 @@ dbutils.library.restartPython()
 
 # COMMAND ----------
 
-dbutils.widgets.dropdown("dry_run",     "true",  ["true", "false"], "Dry Run")
-dbutils.widgets.dropdown("etf_only",   "false", ["true", "false"], "ETF Only (skip NASDAQ FTP)")
-dbutils.widgets.dropdown("skip_ibkr",  "true",  ["true", "false"], "Skip IBKR Enrichment")
-dbutils.widgets.text("openfigi_key", "", "OpenFIGI API Key (optional)")
+dbutils.widgets.dropdown("dry_run",    "true",  ["true", "false"], "Dry Run")
+dbutils.widgets.dropdown("etf_only",  "false", ["true", "false"], "ETF Only (skip NASDAQ FTP)")
+dbutils.widgets.dropdown("skip_ibkr", "true",  ["true", "false"], "Skip IBKR Enrichment")
 
-DRY_RUN      = dbutils.widgets.get("dry_run")    == "true"
-ETF_ONLY     = dbutils.widgets.get("etf_only")   == "true"
-SKIP_IBKR    = dbutils.widgets.get("skip_ibkr")  == "true"
-OPENFIGI_KEY = dbutils.widgets.get("openfigi_key").strip() or None
+DRY_RUN   = dbutils.widgets.get("dry_run")   == "true"
+ETF_ONLY  = dbutils.widgets.get("etf_only")  == "true"
+SKIP_IBKR = dbutils.widgets.get("skip_ibkr") == "true"
+
+# Read OpenFIGI key from Databricks Secrets — never hardcode credentials
+try:
+    OPENFIGI_KEY = dbutils.secrets.get(scope="tradeanalytics", key="openfigi-api-key")
+except Exception:
+    OPENFIGI_KEY = None
+    logger.warning("OpenFIGI API key not found in Databricks Secrets — using free tier (10 items/batch)")
 
 print(f"dry_run={DRY_RUN}  etf_only={ETF_ONLY}  skip_ibkr={SKIP_IBKR}")
 if DRY_RUN:
