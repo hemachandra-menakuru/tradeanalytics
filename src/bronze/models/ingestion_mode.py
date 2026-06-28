@@ -136,6 +136,7 @@ class FetchPlan:
     batch_size_days:    int = 30         # chunk large ranges into batches
     is_amendment_run:   bool = False     # True for restatement mode
     watermark:          Optional[IngestionWatermark] = None
+    instrument_id:      Optional[int] = None   # populated when using DeltaWatermarkStore
 
     @property
     def date_range_days(self) -> int:

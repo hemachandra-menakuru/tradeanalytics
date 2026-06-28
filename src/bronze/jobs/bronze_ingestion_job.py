@@ -44,6 +44,8 @@ from src.reference.readers.ticker_reader import TickerReader, TickerInfo  # kept
 from src.bronze.validation.validator import DataQualityValidator
 from src.bronze.writers.bronze_writer import BronzeWriter, BronzeWriteResult
 from src.bronze.writers.watermark_manager import WatermarkManager
+from src.shared.base.watermark_store import WatermarkStore
+from src.control.watermark.delta_watermark_store import DeltaWatermarkStore
 
 logger = logging.getLogger(__name__)
 
@@ -139,17 +141,18 @@ class BronzeIngestionJob:
         ticker_reader: Optional[UniverseReader] = None,
         validator:     Optional[DataQualityValidator] = None,
         writer:        Optional[BronzeWriter] = None,
-        watermark_mgr: Optional[WatermarkManager] = None,
+        watermark_mgr=None,
     ):
         """
         Args:
-            config:       Loaded ConfigNode
-            stream_name:  "daily" | "intraday" | "tick"
-            spark:        SparkSession (None = local/test mode)
-            ticker_reader: Override ticker reader (for testing)
-            validator:    Override validator (for testing)
-            writer:       Override writer (for testing)
-            watermark_mgr: Override watermark manager (for testing)
+            config:        Loaded ConfigNode
+            stream_name:   "daily" | "intraday" | "tick"
+            spark:         SparkSession (None = local/test mode)
+            ticker_reader: Override universe reader (for testing)
+            validator:     Override validator (for testing)
+            writer:        Override writer (for testing)
+            watermark_mgr: Override watermark store — accepts WatermarkStore
+                           (DeltaWatermarkStore) or legacy WatermarkManager
         """
         self._config      = config
         self._stream_name = stream_name
@@ -173,10 +176,8 @@ class BronzeIngestionJob:
             catalog=catalog, schema=schema,
         )
 
-        self._watermark_mgr = watermark_mgr or WatermarkManager(
-            mode=self._mode, spark=spark,
-            catalog=catalog, schema=schema,
-            watermark_table=self._stream_cfg.watermark_table,
+        self._watermark_mgr = watermark_mgr or DeltaWatermarkStore(
+            mode=self._mode, spark=spark, catalog=catalog,
         )
 
         self._planner          = IngestionPlanner(config, stream_name)
@@ -320,20 +321,32 @@ class BronzeIngestionJob:
         Process one ticker through the full pipeline.
         Returns BronzeWriteResult or None if NO_OP.
         """
-        symbol   = ticker.symbol
-        interval = self._stream_cfg.intervals[0]  # primary interval for stream — single source of truth
+        symbol    = ticker.symbol
+        interval  = self._stream_cfg.intervals[0]
+        stream    = self._stream_name
 
-        # Step 1: Read watermark
-        watermark = self._watermark_mgr.get_watermark(symbol, interval)
+        # Step 1: Read watermark — use instrument_id if available, else symbol fallback
+        if ticker.instrument_id is not None and isinstance(self._watermark_mgr, DeltaWatermarkStore):
+            watermark = self._watermark_mgr.get_watermark(ticker.instrument_id, stream)
+        else:
+            watermark = self._watermark_mgr.get_watermark(symbol, interval)
 
-        # Step 2: Determine fetch plan
-        plan = self._planner.plan(
-            symbol=symbol,
-            interval=interval,
-            watermark=watermark,
-            as_of_date=today,
-            ticker_history_start=ticker.effective_history_start,
-        )
+        # Step 2: Determine fetch plan — table-driven when instrument_id available
+        if ticker.instrument_id is not None:
+            plan = self._planner.plan(
+                instrument=ticker,
+                stream=stream,
+                watermark=watermark,
+                as_of_date=today,
+            )
+        else:
+            plan = self._planner.plan(
+                symbol=symbol,
+                interval=interval,
+                watermark=watermark,
+                as_of_date=today,
+                ticker_history_start=ticker.effective_history_start,
+            )
 
         # Override plan date range if explicit start/end provided
         # (used by smoke tests and ad-hoc backfills via notebook widgets)
@@ -414,6 +427,7 @@ class BronzeIngestionJob:
             validation_summary=validation_summary,
             write_result=write_result,
             batch_id=batch_id,
+            instrument_id=ticker.instrument_id,
         )
 
         return write_result
@@ -427,6 +441,7 @@ class BronzeIngestionJob:
         validation_summary,
         write_result,
         batch_id: str,
+        instrument_id: Optional[int] = None,
     ) -> None:
         """Update ingestion watermark after a successful write."""
         if write_result.records_written == 0 and write_result.records_amended == 0:
@@ -446,20 +461,33 @@ class BronzeIngestionJob:
             min_date = min(min_date, existing_watermark.earliest_date)
             max_date = max(max_date, existing_watermark.latest_date)
 
-        self._watermark_mgr.update_watermark(
-            symbol=symbol,
-            interval=interval,
-            earliest_date=min_date,
-            latest_date=max_date,
-            record_count=self._writer.get_record_count(
+        record_count = self._writer.get_record_count(
+            symbol=symbol, interval=interval, table_name=self._stream_cfg.table,
+        )
+
+        # Use instrument_id-keyed update when DeltaWatermarkStore is wired
+        if instrument_id is not None and isinstance(self._watermark_mgr, DeltaWatermarkStore):
+            self._watermark_mgr.update_watermark(
+                instrument_id=instrument_id,
+                stream=self._stream_name,
+                earliest_date=min_date,
+                latest_date=max_date,
+                record_count=record_count,
+                batch_id=batch_id,
+                mode=plan.mode.value,
+                status="success",
+            )
+        else:
+            self._watermark_mgr.update_watermark(
                 symbol=symbol,
                 interval=interval,
-                table_name=self._stream_cfg.table,
-            ),
-            batch_id=batch_id,
-            mode=plan.mode.value,
-            status="success",
-        )
+                earliest_date=min_date,
+                latest_date=max_date,
+                record_count=record_count,
+                batch_id=batch_id,
+                mode=plan.mode.value,
+                status="success",
+            )
 
     def _fetch_in_batches(
         self,

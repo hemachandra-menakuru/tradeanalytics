@@ -30,6 +30,8 @@ from typing import Optional
 
 from src.shared.config.config_loader import ConfigNode
 from src.shared.base.trading_calendar import TradingCalendar
+from src.shared.base.universe_reader import InstrumentInfo
+from src.shared.base.watermark_store import IngestionWatermarkRecord
 from src.bronze.models.ingestion_mode import (
     IngestionMode, IngestionWatermark, FetchPlan
 )
@@ -100,25 +102,56 @@ class IngestionPlanner:
 
     def plan(
         self,
-        symbol: str,
-        interval: str,
-        watermark: Optional[IngestionWatermark],
+        symbol: str = "",
+        interval: str = "",
+        watermark=None,
         as_of_date: Optional[date] = None,
         ticker_history_start: Optional[date] = None,
+        instrument: Optional[InstrumentInfo] = None,
+        stream: Optional[str] = None,
     ) -> FetchPlan:
         """
-        Determine the fetch plan for a symbol + interval.
+        Determine the fetch plan for an instrument.
 
-        Args:
-            symbol:               Ticker e.g. "AAPL"
-            interval:             Interval e.g. "1d"
-            watermark:            Current watermark (None = first run)
-            as_of_date:           Planning date (default: today)
-            ticker_history_start: Per-ticker override from ref_tickers
+        Supports two calling conventions:
+
+        Table-driven (Phase 2.5+):
+            plan(instrument=InstrumentInfo, stream="daily", watermark=IngestionWatermarkRecord)
+
+        Legacy (backward compat for existing tests):
+            plan(symbol="AAPL", interval="1d", watermark=IngestionWatermark)
 
         Returns:
-            FetchPlan with mode, start_date, end_date, batch_size
+            FetchPlan with mode, start_date, end_date, batch_size, instrument_id
         """
+        # Resolve inputs — table-driven takes priority over legacy params
+        if instrument is not None:
+            symbol               = instrument.symbol
+            ticker_history_start = instrument.effective_history_start
+            instrument_id        = instrument.instrument_id
+        else:
+            instrument_id = None
+
+        if stream is not None:
+            interval = self._stream_cfg.intervals[0] if not interval else interval
+
+        # Normalise watermark — both IngestionWatermark and IngestionWatermarkRecord
+        # expose earliest_date and latest_date, so the logic below works with either.
+        # IngestionWatermarkRecord additionally has .status for SKIP detection.
+        if watermark is not None and isinstance(watermark, IngestionWatermarkRecord):
+            if watermark.status == "suspended":
+                logger.info(f"[{symbol}] SKIP — watermark status=suspended")
+                today      = as_of_date or date.today()
+                batch_size = self._stream_cfg.ingestion.batch_size_days
+                return FetchPlan(
+                    symbol=symbol, interval=interval,
+                    mode=IngestionMode.NO_OP,
+                    start_date=today, end_date=today,
+                    ingestion_type=IngestionMode.NO_OP.ingestion_type,
+                    batch_size_days=batch_size,
+                    instrument_id=instrument_id,
+                )
+
         today         = as_of_date or date.today()
         ingestion_cfg = self._stream_cfg.ingestion
         history_cfg   = self._stream_cfg.history
@@ -137,6 +170,7 @@ class IngestionPlanner:
                 start_date=start, end_date=today,
                 ingestion_type=IngestionMode.FORCE_RELOAD.ingestion_type,
                 batch_size_days=batch_size, watermark=watermark,
+                instrument_id=instrument_id,
             )
 
         # ── Priority 2: Restatement ───────────────────────────────────────
@@ -152,7 +186,7 @@ class IngestionPlanner:
                 start_date=start, end_date=end,
                 ingestion_type=IngestionMode.RESTATEMENT.ingestion_type,
                 batch_size_days=batch_size, is_amendment_run=True,
-                watermark=watermark,
+                watermark=watermark, instrument_id=instrument_id,
             )
 
         # ── Priority 3: Explicit date range ──────────────────────────────
@@ -168,6 +202,7 @@ class IngestionPlanner:
                 start_date=start, end_date=end,
                 ingestion_type=IngestionMode.EXPLICIT_DATE_RANGE.ingestion_type,
                 batch_size_days=batch_size, watermark=watermark,
+                instrument_id=instrument_id,
             )
 
         # ── Priority 4: History extension ─────────────────────────────────
@@ -187,6 +222,7 @@ class IngestionPlanner:
                     start_date=ext_start, end_date=end,
                     ingestion_type=IngestionMode.HISTORY_EXTENSION.ingestion_type,
                     batch_size_days=batch_size, watermark=watermark,
+                    instrument_id=instrument_id,
                 )
 
         # ── Priority 5: Initial load ──────────────────────────────────────
@@ -199,6 +235,7 @@ class IngestionPlanner:
                 start_date=start, end_date=today,
                 ingestion_type=IngestionMode.INITIAL_LOAD.ingestion_type,
                 batch_size_days=batch_size, watermark=None,
+                instrument_id=instrument_id,
             )
 
         # ── Priority 6: Gap fill ──────────────────────────────────────────
@@ -216,6 +253,7 @@ class IngestionPlanner:
                 start_date=start, end_date=today,
                 ingestion_type=IngestionMode.GAP_FILL.ingestion_type,
                 batch_size_days=batch_size, watermark=watermark,
+                instrument_id=instrument_id,
             )
 
         # ── Priority 7: No-op ─────────────────────────────────────────────
@@ -228,6 +266,7 @@ class IngestionPlanner:
                 start_date=today, end_date=today,
                 ingestion_type=IngestionMode.NO_OP.ingestion_type,
                 batch_size_days=batch_size, watermark=watermark,
+                instrument_id=instrument_id,
             )
 
         # ── Priority 8: Incremental ───────────────────────────────────────
@@ -244,6 +283,7 @@ class IngestionPlanner:
             start_date=start, end_date=today,
             ingestion_type=IngestionMode.INCREMENTAL.ingestion_type,
             batch_size_days=batch_size, watermark=watermark,
+            instrument_id=instrument_id,
         )
 
     def _get_initial_start(self, today, history_cfg, ticker_history_start):
