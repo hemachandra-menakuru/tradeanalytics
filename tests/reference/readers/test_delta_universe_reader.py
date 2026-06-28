@@ -20,7 +20,7 @@ Scenarios:
 import pytest
 from datetime import date
 
-from src.reference.managers.delta_universe_reader import DeltaUniverseReader
+from src.reference.readers.delta_universe_reader import DeltaUniverseReader
 from src.shared.base.universe_reader import UniverseReader, InstrumentInfo
 
 

@@ -40,7 +40,7 @@ from src.bronze.factory.provider_factory import MarketDataFactory
 from src.bronze.models.ingestion_mode import FetchPlan, IngestionMode
 from src.bronze.models.ingestion_planner import IngestionPlanner
 from src.shared.base.universe_reader import UniverseReader, InstrumentInfo
-from src.reference.managers.ticker_reader import TickerReader, TickerInfo  # kept for backward compat
+from src.reference.readers.ticker_reader import TickerReader, TickerInfo  # kept for backward compat
 from src.bronze.validation.validator import DataQualityValidator
 from src.bronze.writers.bronze_writer import BronzeWriter, BronzeWriteResult
 from src.bronze.writers.watermark_manager import WatermarkManager

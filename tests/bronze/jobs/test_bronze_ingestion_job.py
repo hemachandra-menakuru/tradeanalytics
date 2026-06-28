@@ -11,7 +11,7 @@ from src.bronze.jobs.bronze_ingestion_job import BronzeIngestionJob, JobRunSumma
 from src.bronze.writers.bronze_writer import BronzeWriter
 from src.bronze.writers.watermark_manager import WatermarkManager
 from src.bronze.validation.validator import DataQualityValidator
-from src.reference.managers.ticker_reader import TickerReader
+from src.reference.readers.ticker_reader import TickerReader
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 TODAY = date(2026, 6, 22)

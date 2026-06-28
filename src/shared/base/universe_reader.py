@@ -17,9 +17,9 @@ Why this exists:
   (or injected via DI) — the job itself never changes.
 
 Implementations:
-  CsvUniverseReader         → src/reference/managers/ticker_reader.py
+  CsvUniverseReader         → src/reference/readers/ticker_reader.py
                               (TickerReader is-a UniverseReader — backward compatible)
-  DeltaUniverseReader       → src/reference/managers/delta_universe_reader.py  (Phase 2.5)
+  DeltaUniverseReader       → src/reference/readers/delta_universe_reader.py  (Phase 2.5)
 
 Usage:
     from src.shared.base.universe_reader import UniverseReader, InstrumentInfo

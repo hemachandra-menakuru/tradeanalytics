@@ -2,7 +2,7 @@
 import pytest
 from pathlib import Path
 from src.shared.config.config_loader import ConfigLoader
-from src.reference.managers.ticker_reader import TickerReader, TickerInfo
+from src.reference.readers.ticker_reader import TickerReader, TickerInfo
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
