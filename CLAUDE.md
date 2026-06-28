@@ -84,9 +84,10 @@ Adding a new component = implement ABC + register (one line) + update YAML. Zero
 |-------|------|--------|
 | 1 | Infrastructure | ✅ Complete |
 | 2 | Bronze Ingestion | ✅ Merged to main — PR #6, 2026-06-25. IBKR smoke test passed, source=ibkr confirmed |
-| 2.5 | Pre-Phase 3 Restructure | ✅ Complete — merged to main via PR #7, 2026-06-28. Reference/control tables built and seeded. DeltaWatermarkStore, DeltaUniverseReader, table-driven IngestionPlanner all wired. Smoke test passed (2 SPY records, source=ibkr, instrument_id=505 watermark in control schema). |
-| 3A | Corporate Actions + Vendor-Agnostic Schema | 🔄 In progress — DDL notebook + Python classes written on feature/phase3-silver. Run notebook `04_phase3a_schema_additions.py` on cluster to apply. |
-| 3 | Silver (Feature Engineering) | Not started — Phase 3A prerequisite in progress |
+| 2.5 | Pre-Phase 3 Restructure | ✅ Complete — merged to main via PR #7, 2026-06-28. Reference/control tables built and seeded. DeltaWatermarkStore, DeltaUniverseReader, table-driven IngestionPlanner all wired. |
+| 3A | Corporate Actions + Vendor-Agnostic Schema | ✅ Complete — DDL notebook run on cluster 2026-06-28. ibkr_con_id migrated to instrument_vendor_id and dropped. Corporate actions tables created. Python classes written and tested (93 tests). |
+| 3 (pre) | Bronze pre-Silver fixes | ✅ Complete 2026-06-28 — instrument_id stamped on bronze records, ingested_by fixed (was NULL), vendor wired into watermark, schema_migrations notebook run. 8-instrument Yahoo ingestion verified on feature/phase3-silver. |
+| 3 | Silver (Feature Engineering) | 🔜 Next — step-by-step teaching approach |
 | 4 | Gold + Signal Platform | Not started |
 | 4b | Signal sharing (Telegram/API) | Not started |
 | 5a | HC's execution bot | Not started |
@@ -568,11 +569,20 @@ S3: `s3://handh-trade-refined-use1/bronze/`
 | Job run log | `tradeanalytics.control.job_run_log` | 0 | Added `vendor` column |
 | Corp action candidates | `tradeanalytics.control.corporate_action_candidates` | 0 | New in Phase 3A — saga state machine |
 
-### Key instrument_ids (permanent)
+### Key instrument_ids (permanent — verified 2026-06-28)
 | Symbol | instrument_id |
 |--------|--------------|
-| SPY | 505 |
-| QQQ | 506 (approx — verify in reference.instrument_listing) |
+| NVDA | 1 |
+| AAPL | 5 |
+| MSFT | 9 |
+| AMZN | 13 |
+| GOOGL | 17 |
+| SPY | TBC — scroll reference.instrument_listing |
+| QQQ | TBC — scroll reference.instrument_listing |
+| TSLA | TBC — scroll reference.instrument_listing |
+
+Note: reference table was seeded with a larger universe (20+ instruments). IDs 1-19+ visible.
+Old Phase 2.5 IDs (SPY=505) are stale — tables were truncated and re-seeded 2026-06-28.
 
 ---
 
@@ -656,9 +666,33 @@ Feature store: `tradeanalytics.feature_store.*`
 
 1. Upload this `CLAUDE.md` file first
 2. Confirm: any changes since last session?
-3. Run `/Users/hemachandra/anaconda3/envs/tradeanalytics/bin/python -m pytest tests/ -q` — confirm 309 tests (306 passed + 3 skipped gateway tests) on branch `main`
+3. Run `/Users/hemachandra/anaconda3/envs/tradeanalytics/bin/python -m pytest tests/ -q` — confirm 405 tests passing (402 + 3 new corporate actions tests) on branch `feature/phase3-silver`
 4. State the immediate task
 5. **Next up: Phase 3 (Silver — feature engineering, step-by-step teaching)**
+
+## 14. Ops Runbook — Known Gotchas
+
+### After `databricks bundle deploy` — cluster module cache
+Databricks clusters cache Python `.pyc` bytecode in memory. Deploying new code via
+`databricks bundle deploy` updates files on the workspace filesystem but the running
+cluster does not reload them automatically.
+
+**Fix:** After every deploy, either:
+- Restart the cluster (Compute → Restart), OR
+- Detach and re-attach the notebook to the cluster
+
+Serverless compute does not have this problem — it spins a fresh environment per run.
+But serverless has **no outbound internet access** in this workspace — Yahoo Finance and
+IBKR are both unreachable. Always use the regular cluster for notebook-based ingestion.
+
+### Ingestion execution paths
+| Path | IBKR reachable | Yahoo reachable | Module cache issue |
+|---|---|---|---|
+| Regular cluster (notebook) | ❌ | ✅ | ✅ restart after deploy |
+| Serverless (notebook) | ❌ | ❌ | ✅ always fresh |
+| Databricks Connect (local Mac) | ✅ | ✅ | ✅ always fresh |
+
+**Production ingestion** must use Databricks Connect from local Mac — only path with IBKR access.
 ## Project State — June 2026
 
 ---
@@ -1070,7 +1104,7 @@ GitHub: `hemachandra-menakuru/tradeanalytics` (public)
 |---|---|---|
 | OQ-1 | `start_date`/`end_date` widget parameters do not prevent `INITIAL_LOAD` mode — IBKR returns full 10-year history. Option A (post-fetch Python filtering) designed but not implemented. | Designed, not coded |
 | OQ-2 | Smoke test ran with `source=yahoo` due to stale cached notebook. Tables must be truncated and smoke test re-run with IBKR. | Blocked on IBKR gateway being reachable |
-| OQ-3 | IBKR Client Portal REST API is only reachable from local Mac (gateway runs on `localhost:5055`). For Databricks jobs to ingest live data, either: (a) gateway must be tunnelled, or (b) ingestion runs locally and results are written to S3/Delta. Architecture for production ingestion path not finalised. | Open |
+| OQ-3 | IBKR Client Portal REST API is only reachable from local Mac (gateway runs on `localhost:5055`). For Databricks jobs to ingest live data, either: (a) gateway must be tunnelled, or (b) ingestion runs locally and results are written to S3/Delta. Architecture for production ingestion path not finalised. **Serverless compute also has no outbound internet access in this workspace — Yahoo Finance unreachable from serverless. Use regular cluster for notebook-based ingestion, or Databricks Connect for local execution.** | Open |
 
 #### 6.2 Phase 3 Design (Not Yet Started)
 
