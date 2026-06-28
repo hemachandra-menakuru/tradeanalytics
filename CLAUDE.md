@@ -22,7 +22,7 @@
 | IBKR account | `U5498892`, gateway at `~/dev/tools/ibkr/clientportal.gw`, port `5055` |
 | Conda env | `tradeanalytics` (Python 3.11, `databricks-connect==15.4.25`) |
 | Repo path (local) | `/Users/hemachandra/projects/tradeanalytics` (shell alias: `~/pr/tradeanalytics`) |
-| Active branch | `feature/phase3-restructure` (pre-Phase 3 redesign — not yet merged) |
+| Active branch | `main` (Phase 2.5 merged 2026-06-28 via PR #7) |
 | Git pager | Disabled — `git config --global core.pager cat` (already set) |
 
 ---
@@ -84,7 +84,7 @@ Adding a new component = implement ABC + register (one line) + update YAML. Zero
 |-------|------|--------|
 | 1 | Infrastructure | ✅ Complete |
 | 2 | Bronze Ingestion | ✅ Merged to main — PR #6, 2026-06-25. IBKR smoke test passed, source=ibkr confirmed |
-| 2.5 | Pre-Phase 3 Restructure | 🔄 In progress — branch `feature/phase3-restructure`. Folder restructure done, table architecture designed, codebase review + 14 fixes applied (2026-06-26). Reference/control Delta tables not yet built. |
+| 2.5 | Pre-Phase 3 Restructure | ✅ Complete — merged to main via PR #7, 2026-06-28. Reference/control tables built and seeded. DeltaWatermarkStore, DeltaUniverseReader, table-driven IngestionPlanner all wired. Smoke test passed (2 SPY records, source=ibkr, instrument_id=505 watermark in control schema). |
 | 3 | Silver (Feature Engineering) | Not started — blocked on Phase 2.5 completion |
 | 4 | Gold + Signal Platform | Not started |
 | 4b | Signal sharing (Telegram/API) | Not started |
@@ -407,6 +407,20 @@ smoke_test_params:
 ### Run 1 — 2026-06-22 (Yahoo — stale cached notebook, invalid)
 Wrote 2,636 SPY records with `source=yahoo`. Tables were truncated 2026-06-25.
 
+### Run 3 — 2026-06-28 (IBKR — Phase 2.5 smoke test) ✅
+
+| Check | Result |
+|-------|--------|
+| source | ✅ `ibkr` |
+| instrument_id | ✅ 505 (SPY permanent surrogate key) |
+| watermark table | ✅ `control.ingestion_watermark` (not bronze schema) |
+| watermark key | ✅ `instrument_id=505 + stream=daily` |
+| DeltaUniverseReader | ✅ read from `reference.ticker_feed_config` JOIN |
+| Date range | 2026-06-16 → 2026-06-17 (2 records) |
+| Records written | 2 |
+| Records rejected | 0 |
+| Execution | Local Databricks Connect, cluster `0624-230428-oxt7myog` |
+
 ### Run 2 — 2026-06-25 (IBKR — confirmed valid) ✅
 
 | Check | Result |
@@ -487,11 +501,11 @@ IBKR provider sets `ingested_by="ibkr_provider_v1"` on raw records but field arr
 as NULL in Delta. `validator._enrich_record()` uses `enriched.get("ingested_by", None)`
 which should preserve the value. Investigate whether it's being overwritten somewhere.
 
-### Phase 2.5 Technical Debt (fix before Phase 3)
-1. **`WatermarkManager` reads/writes `symbol` as key** — must be migrated to `instrument_id` when control tables are built. Currently in `src/bronze/writers/watermark_manager.py`, will move to `src/control/watermark/`. `WatermarkStore` ABC already built (AR-4 ✅) — just needs the new implementation.
-2. **`TickerReader` reads from CSV** — replace with `TickerFeedConfigManager` reading from `reference.ticker_feed_config` Delta table.
-3. **`IngestionPlanner` reads from YAML** — replace desired state reads with `ticker_feed_config` Delta table reads.
-4. **`market_calendar`** — replace hardcoded 2010–2040 holiday list with `reference.market_calendar` table driven by `exchange_calendars` Python library.
+### Phase 2.5 Technical Debt — ALL RESOLVED ✅
+1. ~~`WatermarkManager` symbol key~~ → `DeltaWatermarkStore` with `instrument_id+stream` key ✅
+2. ~~`TickerReader` CSV~~ → `DeltaUniverseReader` reading from `reference.ticker_feed_config` ✅
+3. ~~`IngestionPlanner` YAML-driven~~ → table-driven with `InstrumentInfo` + `IngestionWatermarkRecord` ✅
+4. `market_calendar` hardcoded holidays — still TODO for Phase 3 (low priority)
 
 ### Phase 3 Technical Debt (fix during Phase 3)
 1. **BronzeRecord not instantiated** — records flow as dicts, all defaults bypassed.
@@ -522,13 +536,36 @@ config.daily.intervals             # ["1d"]
 
 ## 11. Delta Tables
 
+### Bronze
 | Table | Full Name | Records |
 |-------|-----------|---------|
-| Main bronze | `tradeanalytics.bronze.market_data_daily` | 29 SPY (source=ibkr, 2026-05-13→2026-06-24) |
+| Main | `tradeanalytics.bronze.market_data_daily` | ibkr records (yahoo stale rows deleted 2026-06-28) |
 | Rejected | `tradeanalytics.bronze.market_data_rejected` | 0 |
-| Watermark | `tradeanalytics.bronze.ingestion_watermark_daily` | 1 (SPY) |
 
 S3: `s3://handh-trade-refined-use1/bronze/`
+
+### Reference (built Phase 2.5)
+| Table | Full Name | Records |
+|-------|-----------|---------|
+| Instruments | `tradeanalytics.reference.instrument` | 8 (SPY, QQQ, AAPL, MSFT, GOOGL, AMZN, TSLA, NVDA) |
+| Listings | `tradeanalytics.reference.instrument_listing` | 8 |
+| Universe | `tradeanalytics.reference.universe_membership` | 8 |
+| Feed config | `tradeanalytics.reference.ticker_feed_config` | 8 (all active) |
+| Market calendar | `tradeanalytics.reference.market_calendar` | seeded |
+
+### Control (built Phase 2.5)
+| Table | Full Name | Records |
+|-------|-----------|---------|
+| Watermark | `tradeanalytics.control.ingestion_watermark` | 1 (SPY, instrument_id=505, 2026-06-16→2026-06-17) |
+| Batch config | `tradeanalytics.control.ingestion_batch_config` | 3 (daily/weekly/on_demand) |
+| Commands | `tradeanalytics.control.ingestion_command` | 0 |
+| Job run log | `tradeanalytics.control.job_run_log` | 0 |
+
+### Key instrument_ids (permanent)
+| Symbol | instrument_id |
+|--------|--------------|
+| SPY | 505 |
+| QQQ | 506 (approx — verify in reference.instrument_listing) |
 
 ---
 
@@ -551,20 +588,9 @@ Feature store: `tradeanalytics.feature_store.*`
 
 1. Upload this `CLAUDE.md` file first
 2. Confirm: any changes since last session?
-3. Run `/Users/hemachandra/anaconda3/envs/tradeanalytics/bin/python -m pytest tests/ -q` — confirm 249 tests (246 passed + 3 skipped gateway tests) on branch `feature/phase3-restructure`
+3. Run `/Users/hemachandra/anaconda3/envs/tradeanalytics/bin/python -m pytest tests/ -q` — confirm 309 tests (306 passed + 3 skipped gateway tests) on branch `main`
 4. State the immediate task
-5. **Next up (Phase 2.5 — in order):**
-   - Create `tradeanalytics.reference` and `tradeanalytics.control` schemas in Unity Catalog
-   - Build seed notebook for `reference.instrument`, `reference.instrument_listing`, `reference.universe_membership` (on-demand only, no DABs schedule)
-   - Build `reference.ticker_feed_config` and seed with current 8 instruments
-   - Build `reference.market_calendar` (using `exchange_calendars` library)
-   - Build `control.ingestion_watermark` (new schema, replaces `bronze.ingestion_watermark_daily`) — `WatermarkStore` ABC ready
-   - Build `control.ingestion_batch_config`, `control.ingestion_command`, `control.job_run_log`
-   - Migrate `WatermarkManager` from `src/bronze/writers/` → `src/control/watermark/` (implement `WatermarkStore` ABC)
-   - Replace `TickerReader` with `TickerFeedConfigManager` reading from Delta
-   - Update `IngestionPlanner` to use new table-driven desired/actual state reconciliation
-   - PR and merge `feature/phase3-restructure` → `main`
-   - Then start Phase 3 (Silver — feature engineering, step-by-step teaching)
+5. **Next up: Phase 3 (Silver — feature engineering, step-by-step teaching)**
 ## Project State — June 2026
 
 ---
