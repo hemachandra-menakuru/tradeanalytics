@@ -248,7 +248,7 @@ def test_yahoo_get_historical_returns_standard_format(yahoo_provider):
     # Verify standard format fields present
     assert record["symbol"]   == "AAPL"
     assert record["source"]   == "yahoo"
-    assert record["interval"] == "1d"
+    assert record["bar_interval"] == "1d"
     assert record["open"]     == 150.00
     assert record["high"]     == 152.50
     assert record["low"]      == 149.75

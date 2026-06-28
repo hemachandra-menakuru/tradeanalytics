@@ -83,7 +83,7 @@ class IngestionWatermark:
       latest_date   — how current our data is (for incremental updates)
     """
     symbol:             str
-    interval:           str
+    bar_interval:       str
     earliest_date:      date                # oldest record we have
     latest_date:        date                # most recent record we have
     record_count:       int                 # total records in Bronze
@@ -98,7 +98,7 @@ class IngestionWatermark:
     def to_dict(self) -> dict:
         return {
             "symbol":           self.symbol,
-            "interval":         self.interval,
+            "bar_interval":     self.bar_interval,
             "earliest_date":    str(self.earliest_date),
             "latest_date":      str(self.latest_date),
             "record_count":     self.record_count,
@@ -113,7 +113,7 @@ class IngestionWatermark:
         return (
             f"IngestionWatermark("
             f"symbol={self.symbol}, "
-            f"interval={self.interval}, "
+            f"bar_interval={self.bar_interval}, "
             f"earliest={self.earliest_date}, "
             f"latest={self.latest_date}, "
             f"records={self.record_count}"

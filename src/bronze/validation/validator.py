@@ -356,7 +356,7 @@ class DataQualityValidator:
         return {
             "symbol":           record.get("symbol", "unknown"),
             "bar_date":         str(record.get("bar_date", "unknown")),
-            "interval":         record.get("interval", "unknown"),
+            "bar_interval":         record.get("bar_interval", "unknown"),
             "source":           record.get("source", "unknown"),
             "batch_id":         batch_id,
             "rejected_rule":    rule_name,

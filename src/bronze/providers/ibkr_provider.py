@@ -503,7 +503,7 @@ class IBKRProvider(MarketDataProvider):
                 # Identity
                 "symbol":   symbol,
                 "bar_date": bar_date_str,
-                "interval": interval,
+                "bar_interval": interval,
                 "source":   self.provider_name,
 
                 # Raw price

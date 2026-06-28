@@ -20,7 +20,7 @@ class OHLCVRecord(TypedDict, total=False):
     # Identity (required)
     symbol:   str
     bar_date: str        # "YYYY-MM-DD"
-    interval: str        # "1d" | "1h" | "4h" | "5m" | "1m"
+    bar_interval: str        # "1d" | "1h" | "4h" | "5m" | "1m"
     source:   str        # provider name e.g. "ibkr"
 
     # Price (required — never None)

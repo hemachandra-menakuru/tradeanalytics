@@ -35,7 +35,7 @@ def planner(config):
 @pytest.fixture
 def fresh_watermark():
     return IngestionWatermark(
-        symbol="AAPL", interval="1d",
+        symbol="AAPL", bar_interval="1d",
         earliest_date=date(2016, 1, 4),
         latest_date=TODAY - timedelta(days=1),
         record_count=2625,
@@ -45,7 +45,7 @@ def fresh_watermark():
 @pytest.fixture
 def stale_watermark():
     return IngestionWatermark(
-        symbol="AAPL", interval="1d",
+        symbol="AAPL", bar_interval="1d",
         earliest_date=date(2016, 1, 4),
         latest_date=TODAY - timedelta(days=60),
         record_count=2565,
@@ -55,7 +55,7 @@ def stale_watermark():
 @pytest.fixture
 def current_watermark():
     return IngestionWatermark(
-        symbol="AAPL", interval="1d",
+        symbol="AAPL", bar_interval="1d",
         earliest_date=date(2016, 1, 4),
         latest_date=TODAY,
         record_count=2626,
@@ -65,7 +65,7 @@ def current_watermark():
 # Helper to make a fresh watermark for any symbol
 def make_watermark(symbol, latest_date=None):
     return IngestionWatermark(
-        symbol=symbol, interval="1d",
+        symbol=symbol, bar_interval="1d",
         earliest_date=date(2016, 1, 4),
         latest_date=latest_date or (TODAY - timedelta(days=1)),
         record_count=2625,

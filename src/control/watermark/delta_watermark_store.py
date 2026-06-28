@@ -186,7 +186,7 @@ class DeltaWatermarkStore(WatermarkStore):
         row = {
             "instrument_id":        record.instrument_id,
             "stream":               record.stream,
-            "interval":             record.interval,
+            "bar_interval":             record.bar_interval,
             "earliest_date":        record.earliest_date,
             "latest_date":          record.latest_date,
             "last_run_at":          now,
@@ -204,7 +204,7 @@ class DeltaWatermarkStore(WatermarkStore):
         schema = StructType([
             StructField("instrument_id",        LongType(),      False),
             StructField("stream",               StringType(),    False),
-            StructField("interval",             StringType(),    False),
+            StructField("bar_interval",             StringType(),    False),
             StructField("earliest_date",        DateType(),      True),
             StructField("latest_date",          DateType(),      True),
             StructField("last_run_at",          TimestampType(), True),
@@ -229,7 +229,7 @@ class DeltaWatermarkStore(WatermarkStore):
             ON target.instrument_id = source.instrument_id
             AND target.stream       = source.stream
             WHEN MATCHED THEN UPDATE SET
-                target.interval             = source.interval,
+                target.bar_interval         = source.bar_interval,
                 target.earliest_date        = source.earliest_date,
                 target.latest_date          = source.latest_date,
                 target.last_run_at          = source.last_run_at,
@@ -242,11 +242,11 @@ class DeltaWatermarkStore(WatermarkStore):
                 target.vendor               = source.vendor,
                 target.updated_at           = source.updated_at
             WHEN NOT MATCHED THEN INSERT (
-                instrument_id, stream, interval, earliest_date, latest_date,
+                instrument_id, stream, bar_interval, earliest_date, latest_date,
                 last_run_at, record_count, last_batch_id, last_load_type,
                 status, consecutive_failures, last_error, vendor, created_at, updated_at
             ) VALUES (
-                source.instrument_id, source.stream, source.interval,
+                source.instrument_id, source.stream, source.bar_interval,
                 source.earliest_date, source.latest_date,
                 source.last_run_at, source.record_count, source.last_batch_id, source.last_load_type,
                 source.status, source.consecutive_failures, source.last_error, source.vendor,
@@ -260,7 +260,7 @@ class DeltaWatermarkStore(WatermarkStore):
         return IngestionWatermarkRecord(
             instrument_id        = row["instrument_id"],
             stream               = row["stream"],
-            interval             = row.get("interval") or "",
+            interval             = row.get("bar_interval") or "",
             earliest_date        = date.fromisoformat(str(row["earliest_date"])[:10]),
             latest_date          = date.fromisoformat(str(row["latest_date"])[:10]),
             record_count         = row.get("record_count", 0),

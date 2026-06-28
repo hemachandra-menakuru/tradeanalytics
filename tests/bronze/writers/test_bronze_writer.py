@@ -15,7 +15,7 @@ def writer():
 @pytest.fixture
 def clean_record():
     return {
-        "symbol": "AAPL", "bar_date": "2026-06-22", "interval": "1d",
+        "symbol": "AAPL", "bar_date": "2026-06-22", "bar_interval": "1d",
         "source": "yahoo",
         "open": 150.0, "high": 152.5, "low": 149.75, "close": 151.25,
         "volume": 1_000_000,
@@ -28,7 +28,7 @@ def clean_record():
 @pytest.fixture
 def rejected_record():
     return {
-        "symbol": "AAPL", "bar_date": "2026-06-22", "interval": "1d",
+        "symbol": "AAPL", "bar_date": "2026-06-22", "bar_interval": "1d",
         "source": "yahoo",
         "rejected_rule": "high_gte_low",
         "rejection_reason": "High < Low",

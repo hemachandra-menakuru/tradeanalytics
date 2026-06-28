@@ -226,7 +226,7 @@ class BronzeWriter:
         if self._mode == "local":
             return sum(
                 1 for r in self._local_store.get(table_name, [])
-                if r.get("symbol") == symbol and r.get("interval") == interval
+                if r.get("symbol") == symbol and r.get("bar_interval") == interval
             )
         else:
             return self._spark_count_records(symbol, interval, table_name)
@@ -316,7 +316,7 @@ class BronzeWriter:
         return (
             record.get("symbol"),
             record.get("bar_date"),
-            record.get("interval"),
+            record.get("bar_interval"),
             record.get("bar_time_utc"),  # None for daily
         )
 
@@ -432,7 +432,7 @@ class BronzeWriter:
         join_cond = (
             (table_df["symbol"]   == keys_df["_k_symbol"]) &
             (table_df["bar_date"].cast("string") == keys_df["_k_date"]) &
-            (table_df["interval"] == keys_df["_k_interval"]) &
+            (table_df["bar_interval"] == keys_df["_k_interval"]) &
             (
                 (table_df["bar_time_utc"].isNull() & keys_df["_k_bar_time"].isNull()) |
                 (table_df["bar_time_utc"].cast("string") == keys_df["_k_bar_time"])
@@ -441,7 +441,7 @@ class BronzeWriter:
         matched_df = table_df.join(keys_df, on=join_cond, how="inner").select(table_df["*"])
 
         window_spec = Window.partitionBy(
-            "symbol", "bar_date", "interval", "bar_time_utc"
+            "symbol", "bar_date", "bar_interval", "bar_time_utc"
         ).orderBy(F.desc("record_version"))
 
         deduped_df = (

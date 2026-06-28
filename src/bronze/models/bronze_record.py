@@ -110,7 +110,7 @@ class RecordInterval(str, Enum):
         Daily:          symbol + bar_date + interval
         Intraday/Tick:  symbol + bar_date + bar_time_utc + interval
         """
-        base = ["symbol", "bar_date", "interval"]
+        base = ["symbol", "bar_date", "bar_interval"]
         if cls.is_intraday(interval):
             base.insert(2, "bar_time_utc")
         return base
@@ -219,7 +219,7 @@ class BronzeRecord:
     # ── GROUP 1: IDENTITY (required) ──────────────────────────────────────────
     symbol:             str
     bar_date:           date
-    interval:           str
+    bar_interval:           str
     source:             str
     batch_id:           str
     pipeline_version:   str
@@ -326,18 +326,18 @@ class BronzeRecord:
         _require_non_blank(self.pipeline_version, "pipeline_version")
 
         # Interval must be known
-        if self.interval not in RecordInterval.values():
+        if self.bar_interval not in RecordInterval.values():
             raise ValueError(
-                f"Unknown interval '{self.interval}'. "
+                f"Unknown interval '{self.bar_interval}'. "
                 f"Valid intervals: {sorted(RecordInterval.values())}"
             )
 
         # Intraday records must have non-blank bar_time_utc
-        if self.interval in RecordInterval.intraday_values():
+        if self.bar_interval in RecordInterval.intraday_values():
             if not self.bar_time_utc or not str(self.bar_time_utc).strip():
                 raise ValueError(
                     f"'bar_time_utc' is required and cannot be blank for "
-                    f"intraday interval '{self.interval}'. "
+                    f"intraday interval '{self.bar_interval}'. "
                     f"Got: {repr(self.bar_time_utc)}"
                 )
 
@@ -352,7 +352,7 @@ class BronzeRecord:
 
     @property
     def table_tier(self) -> str:
-        return RecordInterval.get_table_tier(self.interval)
+        return RecordInterval.get_table_tier(self.bar_interval)
 
     @property
     def unique_key(self) -> dict:
@@ -363,9 +363,9 @@ class BronzeRecord:
         key = {
             "symbol":   self.symbol,
             "bar_date": str(self.bar_date),
-            "interval": self.interval,
+            "bar_interval": self.bar_interval,
         }
-        if self.interval in RecordInterval.intraday_values():
+        if self.bar_interval in RecordInterval.intraday_values():
             key["bar_time_utc"] = self.bar_time_utc
         return key
 
@@ -450,7 +450,7 @@ class BronzeRecord:
             # GROUP 1
             "symbol":               self.symbol,
             "bar_date":             str(self.bar_date),
-            "interval":             self.interval,
+            "bar_interval":             self.bar_interval,
             "source":               self.source,
             "batch_id":             self.batch_id,
             "pipeline_version":     self.pipeline_version,
@@ -585,7 +585,7 @@ class BronzeRecord:
             f"BronzeRecord("
             f"symbol={self.symbol}, "
             f"bar_date={self.bar_date}, "
-            f"interval={self.interval}, "
+            f"interval={self.bar_interval}, "
             f"close={self.close}, "
             f"source={self.source}, "
             f"version={self.record_version}, "
@@ -605,7 +605,7 @@ class RejectedRecord:
     """
     symbol:             str
     bar_date:           str
-    interval:           str
+    bar_interval:           str
     source:             str
     batch_id:           str
     rejected_rule:      str
@@ -628,7 +628,7 @@ class RejectedRecord:
         return {
             "symbol":               self.symbol,
             "bar_date":             self.bar_date,
-            "interval":             self.interval,
+            "bar_interval":             self.bar_interval,
             "source":               self.source,
             "batch_id":             self.batch_id,
             "rejected_rule":        self.rejected_rule,

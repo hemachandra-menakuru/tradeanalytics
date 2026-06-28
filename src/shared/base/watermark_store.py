@@ -34,7 +34,7 @@ class IngestionWatermarkRecord:
     ):
         self.instrument_id        = instrument_id
         self.stream               = stream
-        self.interval             = interval
+        self.bar_interval         = interval
         self.earliest_date        = earliest_date
         self.latest_date          = latest_date
         self.record_count         = record_count

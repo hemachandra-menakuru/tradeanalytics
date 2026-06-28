@@ -26,7 +26,7 @@ def engine():
 def valid_record():
     """A clean record that passes all rules."""
     return {
-        "symbol": "AAPL", "bar_date": "2026-06-19", "interval": "1d",
+        "symbol": "AAPL", "bar_date": "2026-06-19", "bar_interval": "1d",
         "source": "ibkr",
         "open": 150.0, "high": 152.5, "low": 149.75, "close": 151.25,
         "volume": 1_000_000,

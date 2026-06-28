@@ -119,7 +119,7 @@ class ValidationSummary:
         self.audit_log.append({
             "symbol":       self.symbol,
             "bar_date":     record_date,
-            "interval":     self.interval,
+            "bar_interval":     self.interval,
             "outcome":      outcome,
             "rule":         rule_name,
             "message":      message,
@@ -130,7 +130,7 @@ class ValidationSummary:
         """Compact summary dict for logging — no record data."""
         return {
             "symbol":               self.symbol,
-            "interval":             self.interval,
+            "bar_interval":             self.interval,
             "batch_id":             self.batch_id,
             "validated_at":         self.validated_at,
             "total_input":          self.total_input,
