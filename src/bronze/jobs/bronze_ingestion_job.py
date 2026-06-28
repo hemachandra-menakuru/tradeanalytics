@@ -39,7 +39,8 @@ from src.shared.config.config_loader import ConfigNode
 from src.bronze.factory.provider_factory import MarketDataFactory
 from src.bronze.models.ingestion_mode import FetchPlan, IngestionMode
 from src.bronze.models.ingestion_planner import IngestionPlanner
-from src.reference.managers.ticker_reader import TickerReader, TickerInfo
+from src.shared.base.universe_reader import UniverseReader, InstrumentInfo
+from src.reference.managers.ticker_reader import TickerReader, TickerInfo  # kept for backward compat
 from src.bronze.validation.validator import DataQualityValidator
 from src.bronze.writers.bronze_writer import BronzeWriter, BronzeWriteResult
 from src.bronze.writers.watermark_manager import WatermarkManager
@@ -135,7 +136,7 @@ class BronzeIngestionJob:
         config: ConfigNode,
         stream_name:   str = "daily",
         spark=None,
-        ticker_reader: Optional[TickerReader] = None,
+        ticker_reader: Optional[UniverseReader] = None,
         validator:     Optional[DataQualityValidator] = None,
         writer:        Optional[BronzeWriter] = None,
         watermark_mgr: Optional[WatermarkManager] = None,
@@ -161,7 +162,7 @@ class BronzeIngestionJob:
         schema  = config.databricks.schemas.bronze
 
         # Wire up components (inject or create defaults)
-        self._ticker_reader = ticker_reader or TickerReader(config)
+        self._ticker_reader: UniverseReader = ticker_reader or TickerReader(config)
 
         self._validator = validator or DataQualityValidator.for_stream(
             config, stream_name
@@ -307,7 +308,7 @@ class BronzeIngestionJob:
 
     def _process_ticker(
         self,
-        ticker: TickerInfo,
+        ticker: InstrumentInfo,
         batch_id: str,
         today: date,
         dry_run: bool,
@@ -518,11 +519,9 @@ class BronzeIngestionJob:
     def _get_tickers(
         self,
         symbols: Optional[List[str]],
-    ) -> List[TickerInfo]:
-        """Get ticker list — filtered by symbols if provided."""
-        if symbols:
-            return self._ticker_reader.get_active_tickers(symbols=symbols)
-        return self._ticker_reader.get_active_tickers()
+    ) -> List[InstrumentInfo]:
+        """Get instrument list — filtered by symbols if provided."""
+        return self._ticker_reader.get_active_instruments(symbols=symbols or None)
 
     def _generate_batch_id(self) -> str:
         """Generate unique batch ID for this job run."""
