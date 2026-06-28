@@ -5,6 +5,9 @@ variables:
   env:
     description: Deployment environment
     default: dev
+  pipeline_version:
+    description: Pipeline version for audit trail — override at deploy time with git SHA
+    default: "unknown"
 
 targets:
   dev:
@@ -35,7 +38,7 @@ resources:
         - task_key: bronze_daily_ingestion
           description: "Run Bronze ingestion for daily stream"
           notebook_task:
-            notebook_path: "notebooks/bronze_daily_ingestion.py"
+            notebook_path: "notebooks/bronze/bronze_daily_ingestion.py"
             base_parameters:
               symbols:    "SPY"           # smoke test — 1 symbol only
               dry_run:    "false"
@@ -61,9 +64,59 @@ resources:
               spark.databricks.delta.preview.enabled: "true"
             spark_env_vars:
               ENVIRONMENT: "${var.env}"
+              PIPELINE_VERSION: "${var.pipeline_version}"
       tags:
         project:    tradeanalytics
         layer:      bronze
         stream:     daily
         phase:      "2"
+        managed_by: dabs
+
+    universe_sync:
+      name: "[${var.env}] Reference Universe Sync"
+      description: "Monthly job — syncs instrument universe from NASDAQ FTP + ETF holdings into reference tables"
+
+      schedule:
+        quartz_cron_expression: "0 0 6 1 * ?"   # 6am UTC on the 1st of each month
+        timezone_id: "UTC"
+        pause_status: PAUSED                      # unpause when reference tables are ready
+
+      email_notifications:
+        on_failure:
+          - handh.stocks@gmail.com
+
+      tasks:
+        - task_key: universe_sync
+          description: "Sync instrument universe into reference.instrument + feed_config"
+          notebook_task:
+            notebook_path: "notebooks/reference/02_universe_sync.py"
+            base_parameters:
+              dry_run:      "true"    # set to false when ready for first production run
+              etf_only:     "false"
+              skip_ibkr:    "true"    # always true in cloud — IBKR gateway on localhost only
+              openfigi_key: ""
+          job_cluster_key: reference_job_cluster
+          timeout_seconds: 7200     # 2 hours — OpenFIGI enrichment for 10k instruments
+          retry_on_timeout: false
+          max_retries: 1
+
+      job_clusters:
+        - job_cluster_key: reference_job_cluster
+          new_cluster:
+            spark_version: "15.4.x-scala2.12"
+            node_type_id: "m5.xlarge"
+            num_workers: 1
+            policy_id: "001B2429FBD0E8AD"
+            aws_attributes:
+              availability: SPOT_WITH_FALLBACK
+              first_on_demand: 1
+            spark_conf:
+              spark.databricks.delta.preview.enabled: "true"
+            spark_env_vars:
+              ENVIRONMENT: "${var.env}"
+              PIPELINE_VERSION: "${var.pipeline_version}"
+      tags:
+        project:    tradeanalytics
+        layer:      reference
+        phase:      "2.5"
         managed_by: dabs

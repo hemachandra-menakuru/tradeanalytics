@@ -49,13 +49,13 @@ def main():
     print("="*60)
 
     # Load config
-    from src.config.config_loader import ConfigLoader
+    from src.shared.config.config_loader import ConfigLoader
     config = ConfigLoader.load(environment="dev")
     print(f"\n  Config loaded — source: {config.sources.primary}")
     print(f"  Gateway: {config.sources.ibkr.base_url}")
 
     # Create provider
-    from src.ingestion.providers.ibkr_provider import IBKRProvider
+    from src.bronze.providers.ibkr_provider import IBKRProvider
     provider = IBKRProvider(config)
 
     results = {}
@@ -192,7 +192,7 @@ def main():
     # ── Test 7: Unsupported interval ───────────────────────────────────────────
     header("TEST 7 — Unsupported Interval Raises Error")
     try:
-        from src.ingestion.base.market_data_provider import ProviderNotSupportedError
+        from src.bronze.base.market_data_provider import ProviderNotSupportedError
         try:
             provider.get_historical("SPY", start, end, interval="2d")
             fail("Should have raised ProviderNotSupportedError")

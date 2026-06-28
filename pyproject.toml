@@ -1,0 +1,11 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+markers = [
+    "unit: fast tests with no external dependencies (default)",
+    "integration: requires Databricks Connect (DATABRICKS_TOKEN must be set)",
+    "smoke: requires live IBKR gateway + Databricks (run manually only)",
+]
+addopts = "-m unit --tb=short -q"

@@ -1,2 +1,0 @@
-Please fetch and read my CLAUDE.md before we start:
-https://raw.githubusercontent.com/hemachandra-menakuru/tradeanalytics/feature/phase2-data-ingestion/CLAUDE.md
