@@ -29,18 +29,18 @@ if bundle_path not in sys.path:
 logger.info(f"Bundle path added: {bundle_path}")
 
 # COMMAND ----------
-try:
-    symbols_param    = dbutils.widgets.get("symbols").strip()
-    dry_run_param    = dbutils.widgets.get("dry_run").strip().lower()
-    as_of_date_param = dbutils.widgets.get("as_of_date").strip()
-    start_date_param = dbutils.widgets.get("start_date").strip()
-    end_date_param   = dbutils.widgets.get("end_date").strip()
-except Exception:
-    symbols_param    = ""
-    dry_run_param    = "false"
-    as_of_date_param = ""
-    start_date_param = ""
-    end_date_param   = ""
+dbutils.widgets.text("symbols",    "",      "Symbols (comma-separated, blank = all active)")
+dbutils.widgets.text("dry_run",   "false", "Dry run (true/false)")
+dbutils.widgets.text("as_of_date","",      "As-of date (YYYY-MM-DD, blank = today)")
+dbutils.widgets.text("start_date","",      "Start date override (YYYY-MM-DD, blank = planner)")
+dbutils.widgets.text("end_date",  "",      "End date override (YYYY-MM-DD, blank = planner)")
+
+# COMMAND ----------
+symbols_param    = dbutils.widgets.get("symbols").strip()
+dry_run_param    = dbutils.widgets.get("dry_run").strip().lower()
+as_of_date_param = dbutils.widgets.get("as_of_date").strip()
+start_date_param = dbutils.widgets.get("start_date").strip()
+end_date_param   = dbutils.widgets.get("end_date").strip()
 
 symbols    = [s.strip() for s in symbols_param.split(",") if s.strip()] or None
 dry_run    = dry_run_param == "true"
