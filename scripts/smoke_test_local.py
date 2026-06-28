@@ -61,7 +61,12 @@ def main():
     logger.info("Connecting to Databricks cluster via Databricks Connect ...")
     from databricks.connect import DatabricksSession
 
-    spark = DatabricksSession.builder.profile("handh-trade-aws").getOrCreate()
+    spark = (
+        DatabricksSession.builder
+        .profile("handh-trade-aws")
+        .clusterId("0624-230428-oxt7myog")
+        .getOrCreate()
+    )
     logger.info("Spark session ready")
 
     # ── Config ────────────────────────────────────────────────────────────────
