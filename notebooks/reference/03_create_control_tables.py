@@ -319,7 +319,7 @@ for _, row in tables.iterrows():
 print()
 print("Batch config seeded:")
 spark.sql("""
-    SELECT job_type, batch_groups_included, max_symbols_per_run, description
+    SELECT job_type, batch_groups_included, max_symbols_per_run
     FROM tradeanalytics.control.ingestion_batch_config
     ORDER BY job_type
 """).show(truncate=False)
