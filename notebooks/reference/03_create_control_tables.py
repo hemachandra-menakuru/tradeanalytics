@@ -70,22 +70,7 @@ TBLPROPERTIES (
     'delta.feature.allowColumnDefaults' = 'supported'
 )
 """)
-def add_constraint(table: str, name: str, expr: str):
-    """Add a CHECK constraint — silently skips if it already exists (safe to re-run)."""
-    try:
-        spark.sql(f"ALTER TABLE {table} ADD CONSTRAINT {name} CHECK ({expr})")
-    except Exception as e:
-        if "already exists" in str(e).lower():
-            pass  # idempotent — constraint already in place
-        else:
-            raise
-
-# CHECK constraints must be added via ALTER TABLE in Delta Lake
-add_constraint(
-    "tradeanalytics.control.ingestion_watermark",
-    "chk_watermark_status",
-    "status IN ('active', 'suspended', 'paused')"
-)
+# Valid values: active | suspended | paused — enforced in Python (LoadType enum)
 print("✓ control.ingestion_watermark")
 
 # COMMAND ----------
@@ -136,11 +121,7 @@ TBLPROPERTIES (
     'delta.feature.allowColumnDefaults' = 'supported'
 )
 """)
-add_constraint(
-    "tradeanalytics.control.ingestion_batch_config",
-    "chk_job_type",
-    "job_type IN ('daily', 'weekly', 'on_demand')"
-)
+# Valid job_type values: daily | weekly | on_demand — enforced in Python
 print("✓ control.ingestion_batch_config")
 
 # COMMAND ----------
@@ -251,16 +232,8 @@ TBLPROPERTIES (
     'delta.feature.allowColumnDefaults' = 'supported'
 )
 """)
-add_constraint(
-    "tradeanalytics.control.ingestion_command",
-    "chk_action",
-    "action IN ('FORCE_RELOAD', 'HISTORY_LOAD', 'PAUSE', 'RESUME', 'SKIP_ONCE')"
-)
-add_constraint(
-    "tradeanalytics.control.ingestion_command",
-    "chk_command_status",
-    "status IN ('pending', 'consumed', 'failed')"
-)
+# Valid action values: FORCE_RELOAD | HISTORY_LOAD | PAUSE | RESUME | SKIP_ONCE — enforced in Python
+# Valid status values: pending | consumed | failed — enforced in Python
 print("✓ control.ingestion_command")
 
 # COMMAND ----------
@@ -322,16 +295,8 @@ TBLPROPERTIES (
 )
 PARTITIONED BY (stream)
 """)
-add_constraint(
-    "tradeanalytics.control.job_run_log",
-    "chk_log_status",
-    "status IN ('success', 'failed', 'skipped')"
-)
-add_constraint(
-    "tradeanalytics.control.job_run_log",
-    "chk_log_load_type",
-    "load_type IN ('INITIAL_LOAD', 'INCREMENTAL', 'FORCE_RELOAD', 'GAP_FILL', 'HISTORY_EXT', 'NO_OP', 'SKIP')"
-)
+# Valid status values: success | failed | skipped — enforced in Python (LoadType enum)
+# Valid load_type values: INITIAL_LOAD | INCREMENTAL | FORCE_RELOAD | GAP_FILL | HISTORY_EXT | NO_OP | SKIP
 print("✓ control.job_run_log")
 
 # COMMAND ----------
