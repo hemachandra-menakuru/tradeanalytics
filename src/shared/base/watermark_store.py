@@ -30,6 +30,7 @@ class IngestionWatermarkRecord:
         consecutive_failures: int = 0,
         last_error_message: Optional[str] = None,
         interval: str = "",
+        vendor: Optional[str] = None,
     ):
         self.instrument_id        = instrument_id
         self.stream               = stream
@@ -42,6 +43,7 @@ class IngestionWatermarkRecord:
         self.status               = status
         self.consecutive_failures = consecutive_failures
         self.last_error_message   = last_error_message
+        self.vendor               = vendor
 
 
 class WatermarkStore(ABC):
@@ -76,6 +78,7 @@ class WatermarkStore(ABC):
         status: str,
         error_message: Optional[str] = None,
         interval: str = "",
+        vendor: Optional[str] = None,
     ) -> None:
         """
         Upsert the watermark for instrument_id + stream.

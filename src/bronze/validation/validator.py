@@ -160,6 +160,8 @@ class DataQualityValidator:
         raw_records: List[dict],
         pipeline_version: str = "unknown",
         ingestion_type: str = "scheduled",
+        instrument_id: Optional[int] = None,
+        ingested_by: Optional[str] = None,
     ) -> ValidationSummary:
         """
         Validate a batch of raw OHLCV records for one symbol + interval.
@@ -172,6 +174,9 @@ class DataQualityValidator:
             pipeline_version: Git SHA (stamped on every record)
             ingestion_type:   From IngestionMode.ingestion_type — "backfill" |
                               "scheduled" | "amendment" (stamped on every record)
+            instrument_id:    Permanent surrogate key from reference.instrument
+                              (stamped on every record for Silver joins)
+            ingested_by:      Provider name (e.g. "ibkr", "yahoo") — stamped for audit
         """
         summary = ValidationSummary(
             symbol=symbol,
@@ -188,6 +193,8 @@ class DataQualityValidator:
                 batch_id=batch_id,
                 pipeline_version=pipeline_version,
                 ingestion_type=ingestion_type,
+                instrument_id=instrument_id,
+                ingested_by=ingested_by,
                 summary=summary,
             )
 
@@ -212,6 +219,8 @@ class DataQualityValidator:
         pipeline_version: str,
         ingestion_type: str,
         summary: ValidationSummary,
+        instrument_id: Optional[int] = None,
+        ingested_by: Optional[str] = None,
     ) -> None:
         fired_results = self._engine.apply(record)
         rejections = [r for r in fired_results
@@ -241,6 +250,7 @@ class DataQualityValidator:
             enriched = self._enrich_record(
                 record, [f.rule_name for f in flags], True,
                 batch_id, pipeline_version, ingestion_type,
+                instrument_id=instrument_id, ingested_by=ingested_by,
             )
             summary.flagged_records.append(enriched)
             summary.total_flagged += 1
@@ -256,6 +266,7 @@ class DataQualityValidator:
                 self._enrich_record(
                     record, [], False,
                     batch_id, pipeline_version, ingestion_type,
+                    instrument_id=instrument_id, ingested_by=ingested_by,
                 )
             )
             summary.total_passed += 1
@@ -268,6 +279,8 @@ class DataQualityValidator:
         batch_id: str = "unknown",
         pipeline_version: str = "unknown",
         ingestion_type: str = "scheduled",
+        instrument_id: Optional[int] = None,
+        ingested_by: Optional[str] = None,
     ) -> dict:
         """
         Enrich a validated record with all audit and pipeline fields.
@@ -302,8 +315,9 @@ class DataQualityValidator:
         enriched["is_amended"]        = enriched.get("is_amended", False)
         enriched["amendment_reason"]  = enriched.get("amendment_reason", None)
         enriched["supersedes_batch"]  = enriched.get("supersedes_batch", None)
-        enriched["ingested_by"]       = enriched.get("ingested_by", None)
+        enriched["ingested_by"]       = ingested_by or enriched.get("ingested_by", None)
         enriched["fetch_attempt_count"] = enriched.get("fetch_attempt_count", 1)
+        enriched["instrument_id"]     = instrument_id
 
         # ── Group 4: Session Context (provider may not supply) ────────────
         enriched.setdefault("session_open",  None)

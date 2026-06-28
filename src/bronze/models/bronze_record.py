@@ -288,6 +288,7 @@ class BronzeRecord:
     ingested_at:            Optional[str]   = None
     ingested_by:            Optional[str]   = None
     fetch_attempt_count:    int             = 1
+    instrument_id:          Optional[int]   = None  # permanent surrogate key — None until reference tables seeded
     fetch_duration_ms:      Optional[int]   = None
     data_as_of:             Optional[str]   = None
     ingestion_type:         str             = IngestionType.SCHEDULED.value

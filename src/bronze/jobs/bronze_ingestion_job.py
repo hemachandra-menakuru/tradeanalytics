@@ -402,6 +402,8 @@ class BronzeIngestionJob:
             raw_records=raw_records,
             pipeline_version=self._pipeline_version,
             ingestion_type=plan.ingestion_type,
+            instrument_id=ticker.instrument_id,
+            ingested_by=self._provider.provider_name,
         )
 
         logger.info(
@@ -481,6 +483,7 @@ class BronzeIngestionJob:
                 batch_id=batch_id,
                 mode=plan.mode.value,
                 status="success",
+                vendor=self._provider.provider_name,
             )
         elif isinstance(self._watermark_mgr, DeltaWatermarkStore):
             # instrument_id=None (CSV path) + DeltaWatermarkStore — skip watermark update.

@@ -83,6 +83,7 @@ class DeltaWatermarkStore(WatermarkStore):
         status: str,
         error_message: Optional[str] = None,
         interval: str = "",
+        vendor: Optional[str] = None,
     ) -> None:
         """
         Upsert watermark after a pipeline write.
@@ -114,6 +115,7 @@ class DeltaWatermarkStore(WatermarkStore):
             status               = status,
             consecutive_failures = consecutive_failures,
             last_error_message   = error_message,
+            vendor               = vendor,
         )
 
         if self._mode == "local":
@@ -194,6 +196,7 @@ class DeltaWatermarkStore(WatermarkStore):
             "status":               "active",
             "consecutive_failures": record.consecutive_failures,
             "last_error":           record.last_error_message,
+            "vendor":               record.vendor,
             "created_at":           now,
             "updated_at":           now,
         }
@@ -211,6 +214,7 @@ class DeltaWatermarkStore(WatermarkStore):
             StructField("status",               StringType(),    False),
             StructField("consecutive_failures", IntegerType(),   False),
             StructField("last_error",           StringType(),    True),
+            StructField("vendor",               StringType(),    True),
             StructField("created_at",           TimestampType(), False),
             StructField("updated_at",           TimestampType(), False),
         ])
@@ -235,16 +239,17 @@ class DeltaWatermarkStore(WatermarkStore):
                 target.status               = source.status,
                 target.consecutive_failures = source.consecutive_failures,
                 target.last_error           = source.last_error,
+                target.vendor               = source.vendor,
                 target.updated_at           = source.updated_at
             WHEN NOT MATCHED THEN INSERT (
                 instrument_id, stream, interval, earliest_date, latest_date,
                 last_run_at, record_count, last_batch_id, last_load_type,
-                status, consecutive_failures, last_error, created_at, updated_at
+                status, consecutive_failures, last_error, vendor, created_at, updated_at
             ) VALUES (
                 source.instrument_id, source.stream, source.interval,
                 source.earliest_date, source.latest_date,
                 source.last_run_at, source.record_count, source.last_batch_id, source.last_load_type,
-                source.status, source.consecutive_failures, source.last_error,
+                source.status, source.consecutive_failures, source.last_error, source.vendor,
                 source.created_at, source.updated_at
             )
         """)
@@ -264,4 +269,5 @@ class DeltaWatermarkStore(WatermarkStore):
             status               = row.get("status", "active"),
             consecutive_failures = row.get("consecutive_failures", 0),
             last_error_message   = row.get("last_error"),
+            vendor               = row.get("vendor"),
         )
