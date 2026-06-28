@@ -59,7 +59,6 @@ CREATE TABLE IF NOT EXISTS tradeanalytics.control.ingestion_watermark (
     updated_at           TIMESTAMP NOT NULL,
 
     CONSTRAINT pk_watermark       PRIMARY KEY (watermark_id),
-    CONSTRAINT uq_watermark       UNIQUE (instrument_id, stream),
     CONSTRAINT fk_watermark_instr FOREIGN KEY (instrument_id)
                                   REFERENCES tradeanalytics.reference.instrument(instrument_id)
 )
@@ -111,8 +110,7 @@ CREATE TABLE IF NOT EXISTS tradeanalytics.control.ingestion_batch_config (
     created_at            TIMESTAMP NOT NULL,
     updated_at            TIMESTAMP NOT NULL,
 
-    CONSTRAINT pk_batch_config PRIMARY KEY (config_id),
-    CONSTRAINT uq_batch_config UNIQUE (job_type)
+    CONSTRAINT pk_batch_config PRIMARY KEY (config_id)
 )
 USING DELTA
 COMMENT 'Controls which batch groups and how many symbols each job type processes per run.'
