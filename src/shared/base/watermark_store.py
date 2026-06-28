@@ -1,8 +1,8 @@
 """
 WatermarkStore ABC — decouples ingestion logic from watermark storage backend.
 
-Current implementation: WatermarkManager (Delta table in bronze schema).
-Phase 2.5 target:       migrate to control.ingestion_watermark with instrument_id key.
+Phase 2 (old): WatermarkManager, keyed by symbol + interval, bronze schema.
+Phase 2.5+:    DeltaWatermarkStore, keyed by instrument_id + stream, control schema.
 
 Any new backend (e.g. Redis, Postgres) implements this ABC and drops in via config.
 """
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import date
-from typing import Optional
+from typing import List, Optional
 
 
 class IngestionWatermarkRecord:
@@ -19,23 +19,27 @@ class IngestionWatermarkRecord:
 
     def __init__(
         self,
-        symbol: str,
-        interval: str,
+        instrument_id: int,
+        stream: str,
         earliest_date: date,
         latest_date: date,
         record_count: int,
         batch_id: str,
         mode: str,
         status: str,
+        consecutive_failures: int = 0,
+        last_error_message: Optional[str] = None,
     ):
-        self.symbol        = symbol
-        self.interval      = interval
-        self.earliest_date = earliest_date
-        self.latest_date   = latest_date
-        self.record_count  = record_count
-        self.batch_id      = batch_id
-        self.mode          = mode
-        self.status        = status
+        self.instrument_id        = instrument_id
+        self.stream               = stream
+        self.earliest_date        = earliest_date
+        self.latest_date          = latest_date
+        self.record_count         = record_count
+        self.batch_id             = batch_id
+        self.mode                 = mode
+        self.status               = status
+        self.consecutive_failures = consecutive_failures
+        self.last_error_message   = last_error_message
 
 
 class WatermarkStore(ABC):
@@ -43,37 +47,38 @@ class WatermarkStore(ABC):
     Read/write access to ingestion watermarks.
 
     Watermarks are ACTUAL STATE — never touch them manually.
-    They are a system mirror of what has been fetched.
+    They are a system mirror of what has been fetched per instrument.
     """
 
     @abstractmethod
     def get_watermark(
         self,
-        symbol: str,
-        interval: str,
+        instrument_id: int,
+        stream: str,
     ) -> Optional[IngestionWatermarkRecord]:
         """
-        Return the current watermark for symbol + interval, or None if no data
-        has been ingested yet (signals INITIAL_LOAD to IngestionPlanner).
+        Return the current watermark for instrument_id + stream.
+        Returns None if no data has been ingested yet → signals INITIAL_LOAD.
         """
 
     @abstractmethod
     def update_watermark(
         self,
-        symbol: str,
-        interval: str,
+        instrument_id: int,
+        stream: str,
         earliest_date: date,
         latest_date: date,
         record_count: int,
         batch_id: str,
         mode: str,
         status: str,
+        error_message: Optional[str] = None,
     ) -> None:
         """
-        Upsert the watermark for symbol + interval.
-        Called after every successful write — never on dry runs.
+        Upsert the watermark for instrument_id + stream.
+        Called after every write — never on dry runs.
         """
 
     @abstractmethod
-    def list_watermarks(self, interval: Optional[str] = None) -> list:
-        """Return all watermark records, optionally filtered by interval."""
+    def list_watermarks(self, stream: Optional[str] = None) -> List[IngestionWatermarkRecord]:
+        """Return all watermark records, optionally filtered by stream."""
