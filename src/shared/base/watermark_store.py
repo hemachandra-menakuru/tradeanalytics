@@ -29,9 +29,11 @@ class IngestionWatermarkRecord:
         status: str,
         consecutive_failures: int = 0,
         last_error_message: Optional[str] = None,
+        interval: str = "",
     ):
         self.instrument_id        = instrument_id
         self.stream               = stream
+        self.interval             = interval
         self.earliest_date        = earliest_date
         self.latest_date          = latest_date
         self.record_count         = record_count
@@ -73,6 +75,7 @@ class WatermarkStore(ABC):
         mode: str,
         status: str,
         error_message: Optional[str] = None,
+        interval: str = "",
     ) -> None:
         """
         Upsert the watermark for instrument_id + stream.

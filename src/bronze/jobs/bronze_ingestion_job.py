@@ -474,6 +474,7 @@ class BronzeIngestionJob:
             self._watermark_mgr.update_watermark(
                 instrument_id=instrument_id,
                 stream=self._stream_name,
+                interval=interval,
                 earliest_date=min_date,
                 latest_date=max_date,
                 record_count=record_count,
