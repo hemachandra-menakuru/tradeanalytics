@@ -114,8 +114,14 @@ class IBKRCorporateActionsProvider(CorporateActionsProvider):
                     f"IBKRCorporateActionsProvider: no IBKR conid for instrument_id={instrument_id}"
                 )
                 continue
-            events = self._fetch_events_for_conid(instrument_id, conid, from_date, to_date)
-            results.extend(events)
+            try:
+                events = self._fetch_events_for_conid(instrument_id, conid, from_date, to_date)
+                results.extend(events)
+            except Exception as e:
+                logger.error(
+                    f"IBKRCorporateActionsProvider: error fetching conid={conid} "
+                    f"instrument_id={instrument_id} — {e}"
+                )
         return results
 
     def get_bulk_corporate_actions(

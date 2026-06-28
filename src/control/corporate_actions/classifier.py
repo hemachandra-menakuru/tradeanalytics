@@ -191,7 +191,7 @@ class CorporateActionClassifier:
 
         # No known ratio matched — large move but unrecognised pattern
         # Could be fractional split, earnings gap, or data error
-        if ratio > 0.6 and ratio < 1.4:
+        if ratio >= 0.6 and ratio < 1.4:
             # Within 40% of par — should not have been flagged at 40% threshold, log warning
             return "FALSE_POSITIVE", 1, 1
         else:
