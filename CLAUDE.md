@@ -643,9 +643,108 @@ Run Parts 1–3 first, verify all rows match, then run Part 4 (drop column). Saf
 |---|---|---|
 | 3A | Vendor-agnostic schema + corporate actions tables + Python classes | ✅ Written, notebook pending run |
 | B | ABCs: `IndicatorEngine`, `FeatureEngineer`, `LabelEngine` (+ `min_warmup_bars` contract) | Part 3A complete |
-| C | `market_microstructure` features — daily OHLCV only | Parts 3A + B |
-| D | Continuous + binary labels (daily horizon, dead zone calibrated to spread+slippage) | Part C |
+| C | 60+ features — daily OHLCV only (see feature plan below) | Parts 3A + B |
+| D | Label calibration (histogram analysis first) + binary/continuous labels | Part C |
 | E | Enable intraday stream → intraday microstructure features | After stream enabled |
+
+### Target: 60+ features — planned feature groups (Phase 3C)
+
+**Group 1 — Trend (10 features)**
+| Feature | Formula | Notes |
+|---|---|---|
+| SMA 10, 20, 50, 200 | Rolling mean of close | Raw values — use as ratio to close, not raw price |
+| EMA 10, 20, 50 | Exponentially weighted close | More weight on recent prices |
+| SMA crossover binary | `sma_20 > sma_50` → 1/0 | Encodes trend direction |
+| SMA crossover distance | `(sma_20 - sma_50) / close` | Normalised — captures how deep into trend |
+| Price vs SMA200 | `close / sma_200 - 1` | Long-term mean reversion gauge |
+
+**Group 2 — Momentum (12 features)**
+| Feature | Formula | Notes |
+|---|---|---|
+| RSI 14 | Classic Wilder RSI | Bounded 0–100, overbought/oversold |
+| RSI 7 | Faster RSI | Captures short-term exhaustion |
+| ROC 5, 10, 21 | `(close_t / close_t-n) - 1` | Unbounded momentum, different to RSI |
+| MACD line | EMA(12) - EMA(26) | Trend momentum convergence |
+| MACD signal | EMA(9) of MACD | Trigger line |
+| MACD histogram | MACD - signal | Direction of momentum change |
+| Momentum lags | 1d, 5d, 10d, 21d returns | Explicit price change over N days |
+
+**Group 3 — Volatility (8 features)**
+| Feature | Formula | Notes |
+|---|---|---|
+| ATR 14 | Average True Range | Normalised volatility measure |
+| ATR % | `atr_14 / close` | Scale-invariant version |
+| Bollinger upper/lower | SMA ± 2σ | Volatility envelope |
+| Bollinger %B | `(close - bb_lower) / (bb_upper - bb_lower)` | 0=at lower band, 1=at upper band |
+| Bollinger width | `(bb_upper - bb_lower) / bb_mid` | Volatility expansion/contraction |
+| Realised vol 10d | Rolling 10d std of daily returns | Short-term volatility regime |
+| Realised vol 21d | Rolling 21d std of daily returns | Medium-term volatility regime |
+
+**Group 4 — Volume (8 features)**
+| Feature | Formula | Notes |
+|---|---|---|
+| Volume SMA ratio | `volume / volume.rolling(20).mean()` | RVOL — relative volume vs average |
+| OBV | Cumulative `±volume` by direction | On-Balance Volume — trend confirmation |
+| OBV slope | `(obv_t - obv_t-5) / 5` | Direction of OBV trend |
+| Volume ROC 5 | `(vol_t / vol_t-5) - 1` | Volume momentum |
+| Price × Volume | `close × volume` | Dollar volume — liquidity proxy |
+| CMF 20 | Chaikin Money Flow | Buying/selling pressure |
+| Volume z-score | `(volume - vol_mean) / vol_std` | Standardised volume shock |
+| High volume flag | `volume > 2 × vol_sma20` | Binary — unusual volume day |
+
+**Group 5 — Price structure (8 features)**
+| Feature | Formula | Notes |
+|---|---|---|
+| Overnight gap | `(open - prev_close) / prev_close` | Gap up/down at open |
+| Intraday range | `(high - low) / close` | Bar range as % of price |
+| Upper shadow | `(high - max(open,close)) / close` | Rejection wick above |
+| Lower shadow | `(min(open,close) - low) / close` | Rejection wick below |
+| Body size | `abs(close - open) / close` | Candle body % |
+| Close position | `(close - low) / (high - low)` | Where close sits in bar range |
+| Log return | `log(close / prev_close)` | Stationary, normally distributed |
+| Garman-Klass vol | OHLC volatility estimator | More efficient than close-to-close |
+
+**Group 6 — Cross-sectional / relative (6 features)**
+| Feature | Formula | Notes |
+|---|---|---|
+| Rel strength vs SPY | `close / spy_close - 1` | Alpha vs broad market |
+| Rel strength vs QQQ | `close / qqq_close - 1` | Alpha vs tech |
+| Beta 60d | Rolling 60d regression vs SPY | Market sensitivity |
+| Correlation vs SPY 20d | Rolling 20d correlation | Market co-movement |
+| Sector rank (return) | Percentile rank of 21d return in universe | Cross-sectional momentum |
+| Z-score of 21d return | `(ret_21d - mean) / std` across universe | Standardised relative momentum |
+
+**Group 7 — Regime indicators (4 features)**
+| Feature | Formula | Notes |
+|---|---|---|
+| VIX proxy | Realised vol of SPY last 21d | Fear gauge approximation (until VIX data added) |
+| Market breadth | SPY above SMA200 → 1 else 0 | Bull/bear regime binary |
+| Vol regime | `atr_pct > 80th percentile rolling` | High/low vol binary |
+| Trend strength | `abs(sma_20 - sma_50) / atr_14` | How strong is the trend vs noise |
+
+**Group 8 — Lagged features (4 features)**
+| Feature | Notes |
+|---|---|
+| RSI t-1, t-2 | RSI from prior bars — gives model memory of recent signal |
+| ROC(10) t-1 | Prior momentum reading |
+| ATR% t-5 | Prior volatility state |
+
+**Total planned: ~60–65 features.** More can be added by varying windows (RSI-7 vs RSI-14 already counts as 2).
+
+### ML implementation checklist (from notebook review 2026-06-29 — MUST implement)
+
+| # | Item | Phase | Status |
+|---|---|---|---|
+| 1 | ROC (Rate of Change) as a feature — unbounded momentum | 3C | ⬜ |
+| 2 | Historical swing distribution analysis before picking label threshold | 3D | ⬜ |
+| 3 | Binary label: `return >= threshold within N days` with calibrated N and threshold | 3D | ⬜ |
+| 4 | `scale_pos_weight = count(0) / count(1)` — handle class imbalance in XGBoost | 4 | ⬜ |
+| 5 | Probability threshold tuning 0.30→0.90 — default 0.5 is wrong for rare events | 4 | ⬜ |
+| 6 | Stateful walk-forward — portfolio state carries across folds, not reset | 4 | ⬜ |
+| 7 | Nested exit optimisation per fold — SL%, TP%, holding period, MA exit | 4 | ⬜ |
+| 8 | Sortino Ratio as primary optimisation metric (not Sharpe) | 4 | ⬜ |
+| 9 | SHAP values logged to MLflow after each training run | 4 | ⬜ |
+| 10 | Out-of-sample holdout set — completely withheld from all development | 4 | ⬜ |
 
 ### Step-by-step teaching order (concept first, always)
 1. What is a feature? (EMA, RSI, MACD on real SPY data — visualise first)
