@@ -58,11 +58,10 @@ CREATE TABLE IF NOT EXISTS tradeanalytics.control.ingestion_watermark (
     created_at           TIMESTAMP NOT NULL,
     updated_at           TIMESTAMP NOT NULL,
 
-    CONSTRAINT pk_watermark          PRIMARY KEY (watermark_id),
-    CONSTRAINT uq_watermark          UNIQUE (instrument_id, stream),
-    CONSTRAINT fk_watermark_instr    FOREIGN KEY (instrument_id)
-                                     REFERENCES tradeanalytics.reference.instrument(instrument_id),
-    CONSTRAINT chk_watermark_status  CHECK (status IN ('active', 'suspended', 'paused'))
+    CONSTRAINT pk_watermark       PRIMARY KEY (watermark_id),
+    CONSTRAINT uq_watermark       UNIQUE (instrument_id, stream),
+    CONSTRAINT fk_watermark_instr FOREIGN KEY (instrument_id)
+                                  REFERENCES tradeanalytics.reference.instrument(instrument_id)
 )
 USING DELTA
 COMMENT 'ACTUAL STATE — what data has been fetched per instrument and stream. System-managed, never touch manually.'
@@ -71,6 +70,22 @@ TBLPROPERTIES (
     'delta.feature.allowColumnDefaults' = 'supported'
 )
 """)
+def add_constraint(table: str, name: str, expr: str):
+    """Add a CHECK constraint — silently skips if it already exists (safe to re-run)."""
+    try:
+        spark.sql(f"ALTER TABLE {table} ADD CONSTRAINT {name} CHECK ({expr})")
+    except Exception as e:
+        if "already exists" in str(e).lower():
+            pass  # idempotent — constraint already in place
+        else:
+            raise
+
+# CHECK constraints must be added via ALTER TABLE in Delta Lake
+add_constraint(
+    "tradeanalytics.control.ingestion_watermark",
+    "chk_watermark_status",
+    "status IN ('active', 'suspended', 'paused')"
+)
 print("✓ control.ingestion_watermark")
 
 # COMMAND ----------
@@ -102,18 +117,17 @@ print("✓ control.ingestion_watermark")
 
 spark.sql("""
 CREATE TABLE IF NOT EXISTS tradeanalytics.control.ingestion_batch_config (
-    config_id            BIGINT    GENERATED ALWAYS AS IDENTITY,
-    job_type             STRING    NOT NULL,
-    batch_groups_included STRING   NOT NULL,
-    max_symbols_per_run  INT       NOT NULL DEFAULT 500,
-    is_active            BOOLEAN   NOT NULL DEFAULT true,
-    description          STRING,
-    created_at           TIMESTAMP NOT NULL,
-    updated_at           TIMESTAMP NOT NULL,
+    config_id             BIGINT    GENERATED ALWAYS AS IDENTITY,
+    job_type              STRING    NOT NULL,
+    batch_groups_included STRING    NOT NULL,
+    max_symbols_per_run   INT       NOT NULL DEFAULT 500,
+    is_active             BOOLEAN   NOT NULL DEFAULT true,
+    description           STRING,
+    created_at            TIMESTAMP NOT NULL,
+    updated_at            TIMESTAMP NOT NULL,
 
-    CONSTRAINT pk_batch_config  PRIMARY KEY (config_id),
-    CONSTRAINT uq_batch_config  UNIQUE (job_type),
-    CONSTRAINT chk_job_type     CHECK (job_type IN ('daily', 'weekly', 'on_demand'))
+    CONSTRAINT pk_batch_config PRIMARY KEY (config_id),
+    CONSTRAINT uq_batch_config UNIQUE (job_type)
 )
 USING DELTA
 COMMENT 'Controls which batch groups and how many symbols each job type processes per run.'
@@ -122,6 +136,11 @@ TBLPROPERTIES (
     'delta.feature.allowColumnDefaults' = 'supported'
 )
 """)
+add_constraint(
+    "tradeanalytics.control.ingestion_batch_config",
+    "chk_job_type",
+    "job_type IN ('daily', 'weekly', 'on_demand')"
+)
 print("✓ control.ingestion_batch_config")
 
 # COMMAND ----------
@@ -221,11 +240,9 @@ CREATE TABLE IF NOT EXISTS tradeanalytics.control.ingestion_command (
     consumed_at          TIMESTAMP,
     error_message        STRING,
 
-    CONSTRAINT pk_command          PRIMARY KEY (command_id),
-    CONSTRAINT fk_command_instr    FOREIGN KEY (instrument_id)
-                                   REFERENCES tradeanalytics.reference.instrument(instrument_id),
-    CONSTRAINT chk_action          CHECK (action IN ('FORCE_RELOAD', 'HISTORY_LOAD', 'PAUSE', 'RESUME', 'SKIP_ONCE')),
-    CONSTRAINT chk_command_status  CHECK (status IN ('pending', 'consumed', 'failed'))
+    CONSTRAINT pk_command       PRIMARY KEY (command_id),
+    CONSTRAINT fk_command_instr FOREIGN KEY (instrument_id)
+                                REFERENCES tradeanalytics.reference.instrument(instrument_id)
 )
 USING DELTA
 COMMENT 'One-off operator instructions to the pipeline. Each command fires exactly once then is marked consumed.'
@@ -234,6 +251,16 @@ TBLPROPERTIES (
     'delta.feature.allowColumnDefaults' = 'supported'
 )
 """)
+add_constraint(
+    "tradeanalytics.control.ingestion_command",
+    "chk_action",
+    "action IN ('FORCE_RELOAD', 'HISTORY_LOAD', 'PAUSE', 'RESUME', 'SKIP_ONCE')"
+)
+add_constraint(
+    "tradeanalytics.control.ingestion_command",
+    "chk_command_status",
+    "status IN ('pending', 'consumed', 'failed')"
+)
 print("✓ control.ingestion_command")
 
 # COMMAND ----------
@@ -282,14 +309,9 @@ CREATE TABLE IF NOT EXISTS tradeanalytics.control.job_run_log (
     started_at          TIMESTAMP NOT NULL,
     completed_at        TIMESTAMP,
 
-    CONSTRAINT pk_job_run_log      PRIMARY KEY (log_id),
-    CONSTRAINT fk_log_instr        FOREIGN KEY (instrument_id)
-                                   REFERENCES tradeanalytics.reference.instrument(instrument_id),
-    CONSTRAINT chk_log_status      CHECK (status IN ('success', 'failed', 'skipped')),
-    CONSTRAINT chk_log_load_type   CHECK (load_type IN (
-                                       'INITIAL_LOAD', 'INCREMENTAL', 'FORCE_RELOAD',
-                                       'GAP_FILL', 'HISTORY_EXT', 'NO_OP', 'SKIP'
-                                   ))
+    CONSTRAINT pk_job_run_log PRIMARY KEY (log_id),
+    CONSTRAINT fk_log_instr   FOREIGN KEY (instrument_id)
+                              REFERENCES tradeanalytics.reference.instrument(instrument_id)
 )
 USING DELTA
 COMMENT 'Append-only audit trail of every pipeline fetch. Never updated or deleted.'
@@ -300,6 +322,16 @@ TBLPROPERTIES (
 )
 PARTITIONED BY (stream)
 """)
+add_constraint(
+    "tradeanalytics.control.job_run_log",
+    "chk_log_status",
+    "status IN ('success', 'failed', 'skipped')"
+)
+add_constraint(
+    "tradeanalytics.control.job_run_log",
+    "chk_log_load_type",
+    "load_type IN ('INITIAL_LOAD', 'INCREMENTAL', 'FORCE_RELOAD', 'GAP_FILL', 'HISTORY_EXT', 'NO_OP', 'SKIP')"
+)
 print("✓ control.job_run_log")
 
 # COMMAND ----------
