@@ -7,7 +7,7 @@ BronzeIngestionJob depends on UniverseReader ABC, so no job code changes.
 Reads from three tables joined together:
   reference.ticker_feed_config  — desired state (is_active, target dates, batch_group)
   reference.instrument_listing  — symbol, exchange, currency (is_current=true only)
-  reference.instrument          — asset_class, ibkr_con_id
+  reference.instrument          — asset_class
 
 Returns InstrumentInfo with instrument_id populated — enables instrument_id-keyed
 watermarks and removes all symbol-as-key fragility.

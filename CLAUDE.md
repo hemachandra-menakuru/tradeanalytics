@@ -85,7 +85,8 @@ Adding a new component = implement ABC + register (one line) + update YAML. Zero
 | 1 | Infrastructure | ✅ Complete |
 | 2 | Bronze Ingestion | ✅ Merged to main — PR #6, 2026-06-25. IBKR smoke test passed, source=ibkr confirmed |
 | 2.5 | Pre-Phase 3 Restructure | ✅ Complete — merged to main via PR #7, 2026-06-28. Reference/control tables built and seeded. DeltaWatermarkStore, DeltaUniverseReader, table-driven IngestionPlanner all wired. Smoke test passed (2 SPY records, source=ibkr, instrument_id=505 watermark in control schema). |
-| 3 | Silver (Feature Engineering) | Not started — blocked on Phase 2.5 completion |
+| 3A | Corporate Actions + Vendor-Agnostic Schema | 🔄 In progress — DDL notebook + Python classes written on feature/phase3-silver. Run notebook `04_phase3a_schema_additions.py` on cluster to apply. |
+| 3 | Silver (Feature Engineering) | Not started — Phase 3A prerequisite in progress |
 | 4 | Gold + Signal Platform | Not started |
 | 4b | Signal sharing (Telegram/API) | Not started |
 | 5a | HC's execution bot | Not started |
@@ -312,13 +313,15 @@ tradeanalytics.gold        — Phase 4 (signals, ML)
 |---|---|---|
 | `reference.instrument` | Permanent master record per financial instrument | `instrument_id` (BIGINT, auto, permanent) |
 | `reference.instrument_listing` | Symbol, exchange, MIC — SCD Type 2 | `listing_id`; FK `instrument_id` |
+| `reference.instrument_vendor_id` | Vendor-specific IDs (IBKR conid, Polygon ticker, etc.) — SCD Type 2, append-only | `vendor_mapping_id`; FK `instrument_id` |
 | `reference.universe_membership` | Which instruments are in which trading universe | FK `instrument_id` |
-| `reference.ticker_feed_config` | DESIRED STATE — target dates, run_frequency, batch_group, priority | FK `instrument_id` |
-| `reference.corporate_actions` | Splits, dividends (raw events) | FK `instrument_id` |
-| `reference.adjustment_factors` | Cumulative price adjustment factors per date | FK `instrument_id` |
+| `reference.ticker_feed_config` | DESIRED STATE — target dates, run_frequency, batch_group, priority, preferred_vendor | FK `instrument_id` |
+| `reference.corporate_actions` | All corporate events (splits, dividends, spinoffs) — append-only audit log | `action_id`; FK `instrument_id` |
+| `reference.adjustment_factors` | Cumulative price adjustment factors per date — deferred to Phase 4 | FK `instrument_id` |
 | `reference.market_calendar` | Exchange holidays and half-days | `exchange_mic + date` |
 
-**`instrument` key fields:** `instrument_id`, `isin` (ISO 6166), `figi` (OpenFIGI), `ibkr_con_id`, `asset_class`
+**`instrument` key fields:** `instrument_id`, `isin` (ISO 6166), `figi` (OpenFIGI), `asset_class`
+**NOTE: `ibkr_con_id` removed from `reference.instrument` in Phase 3A — migrated to `reference.instrument_vendor_id`**
 
 **`instrument_listing` key fields:** `symbol`, `exchange`, `exchange_mic` (ISO 10383), `currency`, `min_tick_size`, `min_lot_size`, `valid_from`, `valid_to`, `is_current`, `change_reason`
 
@@ -330,10 +333,11 @@ tradeanalytics.gold        — Phase 4 (signals, ML)
 
 | Table | Purpose | Key |
 |---|---|---|
-| `control.ingestion_watermark` | ACTUAL STATE — earliest/latest date fetched, status, consecutive_failures | FK `instrument_id + stream` |
+| `control.ingestion_watermark` | ACTUAL STATE — earliest/latest date fetched, status, consecutive_failures, vendor | FK `instrument_id + stream` |
 | `control.ingestion_batch_config` | Which batch_groups and run_frequencies execute per job type | `job_type` |
 | `control.ingestion_command` | Explicit one-off instructions (FORCE_RELOAD, PAUSE, RESUME, SKIP_ONCE) | auto, consumed once |
-| `control.job_run_log` | Full audit trail — records_new, records_rejected, load_type, status per run | auto |
+| `control.job_run_log` | Full audit trail — records_new, records_rejected, load_type, status, vendor per run | auto |
+| `control.corporate_action_candidates` | Saga state machine — DETECTED → CLASSIFIED → RELOAD_TRIGGERED → RESOLVED | `candidate_id`; FK `instrument_id` |
 
 **Watermark status values:** `active` | `suspended` (after N consecutive failures, stops auto-retry) | `paused`
 
@@ -544,22 +548,25 @@ config.daily.intervals             # ["1d"]
 
 S3: `s3://handh-trade-refined-use1/bronze/`
 
-### Reference (built Phase 2.5)
-| Table | Full Name | Records |
-|-------|-----------|---------|
-| Instruments | `tradeanalytics.reference.instrument` | 8 (SPY, QQQ, AAPL, MSFT, GOOGL, AMZN, TSLA, NVDA) |
-| Listings | `tradeanalytics.reference.instrument_listing` | 8 |
-| Universe | `tradeanalytics.reference.universe_membership` | 8 |
-| Feed config | `tradeanalytics.reference.ticker_feed_config` | 8 (all active) |
-| Market calendar | `tradeanalytics.reference.market_calendar` | seeded |
+### Reference (built Phase 2.5 + Phase 3A)
+| Table | Full Name | Records | Notes |
+|-------|-----------|---------|-------|
+| Instruments | `tradeanalytics.reference.instrument` | 8 | `ibkr_con_id` removed in Phase 3A |
+| Listings | `tradeanalytics.reference.instrument_listing` | 8 | |
+| Vendor IDs | `tradeanalytics.reference.instrument_vendor_id` | 8 | IBKR conids migrated from `instrument` |
+| Universe | `tradeanalytics.reference.universe_membership` | 8 | |
+| Feed config | `tradeanalytics.reference.ticker_feed_config` | 8 | Added `preferred_vendor`, `fallback_vendor` |
+| Market calendar | `tradeanalytics.reference.market_calendar` | seeded | |
+| Corporate actions | `tradeanalytics.reference.corporate_actions` | 0 | New in Phase 3A |
 
-### Control (built Phase 2.5)
-| Table | Full Name | Records |
-|-------|-----------|---------|
-| Watermark | `tradeanalytics.control.ingestion_watermark` | 1 (SPY, instrument_id=505, 2026-06-16→2026-06-17) |
-| Batch config | `tradeanalytics.control.ingestion_batch_config` | 3 (daily/weekly/on_demand) |
-| Commands | `tradeanalytics.control.ingestion_command` | 0 |
-| Job run log | `tradeanalytics.control.job_run_log` | 0 |
+### Control (built Phase 2.5 + Phase 3A)
+| Table | Full Name | Records | Notes |
+|-------|-----------|---------|-------|
+| Watermark | `tradeanalytics.control.ingestion_watermark` | 1 (SPY) | Added `vendor` column |
+| Batch config | `tradeanalytics.control.ingestion_batch_config` | 3 | |
+| Commands | `tradeanalytics.control.ingestion_command` | 0 | |
+| Job run log | `tradeanalytics.control.job_run_log` | 0 | Added `vendor` column |
+| Corp action candidates | `tradeanalytics.control.corporate_action_candidates` | 0 | New in Phase 3A — saga state machine |
 
 ### Key instrument_ids (permanent)
 | Symbol | instrument_id |
@@ -571,15 +578,76 @@ S3: `s3://handh-trade-refined-use1/bronze/`
 
 ## 12. Phase 3 Preview (Silver — Feature Engineering)
 
-Step-by-step teaching order:
-1. What is a feature? (EMA, RSI, MACD on real SPY data — visualise first)
-2. What is a label? (forward returns — what are we predicting and why?)
-3. What is the feature matrix? (rows=dates, cols=features — read before training)
-4. Train first XGBoost on SPY
-5. Walk-forward validation — out-of-sample IC
-6. Does it actually have edge?
+### Gap analysis performed 2026-06-28
+External AI feature/label catalog validated against our architecture. Full findings in memory: `phase3_external_catalog_gap_analysis.md`. Key locked decisions:
 
-Planned ABCs: `IndicatorEngine`, `FeatureEngineer`, `FeatureScaler`, `RegimeDetector`
+**Violations to fix before any code:**
+- Feature store primary key = `instrument_id + timestamp` (NOT `symbol`) — symbols change/get reused
+- Hurst exponent is NOT a bar-level microstructure feature — it is a weekly Meta-Router input only (Phase 4)
+- FinBERT/transformer sentiment gated on XGBoost baseline proof first (ML sequencing rule)
+- News sentiment = async batch (daily/4H), never a 5-minute live feed (LLM path rule)
+
+**What to adopt from catalog:** point-in-time correctness, stationarity (raw prices forbidden in feature store), scale invariance, feature metadata structure (formula + intuition + windows + output type + `min_warmup_bars`), continuous/binary/triple-barrier label designs
+
+**Data feasibility for Phase 3:** only daily OHLCV Bronze data is available now. Intraday microstructure, order book, options, and sentiment features → ABCs + placeholder only until data pipelines exist.
+
+### Phase 3A — Corporate Actions + Vendor-Agnostic Schema (complete design)
+
+**Problem:** IBKR retroactively adjusts all historical prices on every split. Our Bronze
+stores old prices. After a 4-for-1 split, stored $500 bars become wrong — IBKR now
+returns $125 for the same date. Bronze must be reloaded (full history, not targeted).
+
+**Detection mechanism:** Daily Spark bulk query compares latest Bronze price per instrument
+against what IBKR currently returns for the same bar. Ratio deviation > 40% = corporate action candidate.
+
+**Saga state machine (`control.corporate_action_candidates`):**
+```
+DETECTED → CLASSIFIED → RELOAD_TRIGGERED → RESOLVED
+                                          → FALSE_POSITIVE (earnings gap, not a split)
+                                          → FAILED (retries exhausted)
+```
+Recovery step runs on every job — picks up any row not in a terminal state.
+
+**Python files (new Phase 3A):**
+| File | Purpose |
+|---|---|
+| `src/shared/base/corporate_actions_provider.py` | `CorporateActionsProvider ABC` — vendor-agnostic interface |
+| `src/reference/providers/ibkr_corporate_actions_provider.py` | IBKR implementation (stub endpoint, conid-based) |
+| `src/reference/providers/yahoo_corporate_actions_provider.py` | Yahoo implementation — seed/verify only, never production |
+| `src/control/corporate_actions/detector.py` | `CorporateActionDetector` — Spark bulk detection |
+| `src/control/corporate_actions/classifier.py` | `CorporateActionClassifier` — ratio-to-event-type classification + saga step |
+
+**IBKRCorporateActionsProvider.from_spark()** loads conid map from `reference.instrument_vendor_id`.
+**YahooCorporateActionsProvider.from_spark()** loads symbol map from `reference.instrument_listing`.
+
+**Vendor-agnostic design:** `ibkr_con_id` removed from `reference.instrument`. All vendor IDs
+in `reference.instrument_vendor_id` (vendor=ibkr|polygon|bloomberg). Adding a new vendor =
+INSERT rows for all instruments, zero schema changes.
+
+**Notebook to run:** `notebooks/reference/04_phase3a_schema_additions.py`
+Run Parts 1–3 first, verify all rows match, then run Part 4 (drop column). Safe to re-run.
+
+### Phase 3 build sequence (locked)
+
+| Part | What | Prerequisite |
+|---|---|---|
+| 3A | Vendor-agnostic schema + corporate actions tables + Python classes | ✅ Written, notebook pending run |
+| B | ABCs: `IndicatorEngine`, `FeatureEngineer`, `LabelEngine` (+ `min_warmup_bars` contract) | Part 3A complete |
+| C | `market_microstructure` features — daily OHLCV only | Parts 3A + B |
+| D | Continuous + binary labels (daily horizon, dead zone calibrated to spread+slippage) | Part C |
+| E | Enable intraday stream → intraday microstructure features | After stream enabled |
+
+### Step-by-step teaching order (concept first, always)
+1. What is a feature? (EMA, RSI, MACD on real SPY data — visualise first)
+2. Why raw prices are forbidden (stationarity, split events)
+3. What is `adjustment_factors` and why it must come first
+4. What is a label? (forward returns — what are we predicting and why?)
+5. What is the feature matrix? (rows=dates, cols=features — read before training)
+6. Train first XGBoost on SPY
+7. Walk-forward validation — out-of-sample IC
+8. Does it actually have edge?
+
+Planned ABCs: `IndicatorEngine`, `FeatureEngineer`, `FeatureScaler`, `RegimeDetector`, `LabelEngine`
 Feature store: `tradeanalytics.feature_store.*`
 
 ---
