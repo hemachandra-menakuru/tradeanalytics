@@ -174,16 +174,16 @@ class CorporateActionDetector:
                 SELECT
                     instrument_id,
                     close,
-                    date,
+                    bar_date,
                     record_version,
                     ROW_NUMBER() OVER (
                         PARTITION BY instrument_id
-                        ORDER BY date DESC, record_version DESC
+                        ORDER BY bar_date DESC, record_version DESC
                     ) as rn
                 FROM {self._catalog}.bronze.market_data_daily
                 WHERE instrument_id IS NOT NULL
             )
-            SELECT instrument_id, close, date
+            SELECT instrument_id, close, bar_date
             FROM ranked
             WHERE rn = 1
         """)

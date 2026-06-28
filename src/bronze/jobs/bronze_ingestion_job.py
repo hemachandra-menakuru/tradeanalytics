@@ -454,8 +454,8 @@ class BronzeIngestionJob:
             return
 
         written_dates = [
-            r.get("date") for r in validation_summary.writable_records
-            if r.get("date")
+            r.get("bar_date") for r in validation_summary.writable_records
+            if r.get("bar_date")
         ]
         if not written_dates:
             return

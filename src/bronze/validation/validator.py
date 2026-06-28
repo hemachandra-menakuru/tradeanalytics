@@ -227,7 +227,7 @@ class DataQualityValidator:
                       if r.outcome == ValidationOutcome.REJECTED.value]
         flags      = [r for r in fired_results
                       if r.outcome == ValidationOutcome.FLAGGED.value]
-        record_date = str(record.get("date", "unknown"))
+        record_date = str(record.get("bar_date", "unknown"))
 
         if rejections:
             primary = rejections[0]
@@ -355,7 +355,7 @@ class DataQualityValidator:
     def _build_rejected_record(self, record, rule_name, reason, batch_id, pipeline_version):
         return {
             "symbol":           record.get("symbol", "unknown"),
-            "date":             str(record.get("date", "unknown")),
+            "bar_date":         str(record.get("bar_date", "unknown")),
             "interval":         record.get("interval", "unknown"),
             "source":           record.get("source", "unknown"),
             "batch_id":         batch_id,
@@ -380,7 +380,7 @@ class DataQualityValidator:
         from datetime import date
         accepted_dates = []
         for r in records:
-            date_val = r.get("date")
+            date_val = r.get("bar_date")
             if date_val is None:
                 continue
             try:

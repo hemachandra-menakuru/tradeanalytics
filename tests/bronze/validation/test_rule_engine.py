@@ -26,7 +26,7 @@ def engine():
 def valid_record():
     """A clean record that passes all rules."""
     return {
-        "symbol": "AAPL", "date": "2026-06-19", "interval": "1d",
+        "symbol": "AAPL", "bar_date": "2026-06-19", "interval": "1d",
         "source": "ibkr",
         "open": 150.0, "high": 152.5, "low": 149.75, "close": 151.25,
         "volume": 1_000_000,
@@ -150,21 +150,21 @@ def test_price_positive_fires_for_negative_price(engine, valid_record):
 # ── Weekend date rule ──────────────────────────────────────────────────────────
 
 def test_no_weekend_dates_fires_for_saturday(engine, valid_record):
-    valid_record["date"] = "2026-06-20"  # Saturday
+    valid_record["bar_date"] = "2026-06-20"  # Saturday
     results = engine.apply(valid_record)
     rule_names = [r.rule_name for r in results]
     assert "no_weekend_dates" in rule_names
 
 
 def test_no_weekend_dates_fires_for_sunday(engine, valid_record):
-    valid_record["date"] = "2026-06-21"  # Sunday
+    valid_record["bar_date"] = "2026-06-21"  # Sunday
     results = engine.apply(valid_record)
     rule_names = [r.rule_name for r in results]
     assert "no_weekend_dates" in rule_names
 
 
 def test_no_weekend_dates_passes_for_friday(engine, valid_record):
-    valid_record["date"] = "2026-06-19"  # Friday
+    valid_record["bar_date"] = "2026-06-19"  # Friday
     results = engine.apply(valid_record)
     rule_names = [r.rule_name for r in results]
     assert "no_weekend_dates" not in rule_names

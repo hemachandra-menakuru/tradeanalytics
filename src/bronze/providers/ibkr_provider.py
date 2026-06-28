@@ -337,7 +337,7 @@ class IBKRProvider(MarketDataProvider):
                 continue
 
             # Filter to requested date range
-            record_date = date.fromisoformat(record["date"])
+            record_date = date.fromisoformat(record["bar_date"])
             if start_date <= record_date <= end_date:
                 records.append(record)
 
@@ -502,7 +502,7 @@ class IBKRProvider(MarketDataProvider):
             return {
                 # Identity
                 "symbol":   symbol,
-                "date":     bar_date_str,
+                "bar_date": bar_date_str,
                 "interval": interval,
                 "source":   self.provider_name,
 

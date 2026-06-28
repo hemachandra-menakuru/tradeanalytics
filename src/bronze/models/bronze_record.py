@@ -107,10 +107,10 @@ class RecordInterval(str, Enum):
     def get_unique_key_fields(cls, interval: str) -> List[str]:
         """
         Returns the fields that uniquely identify a record.
-        Daily:          symbol + date + interval
-        Intraday/Tick:  symbol + date + bar_time_utc + interval
+        Daily:          symbol + bar_date + interval
+        Intraday/Tick:  symbol + bar_date + bar_time_utc + interval
         """
-        base = ["symbol", "date", "interval"]
+        base = ["symbol", "bar_date", "interval"]
         if cls.is_intraday(interval):
             base.insert(2, "bar_time_utc")
         return base
@@ -218,7 +218,7 @@ class BronzeRecord:
 
     # ── GROUP 1: IDENTITY (required) ──────────────────────────────────────────
     symbol:             str
-    date:               date
+    bar_date:           date
     interval:           str
     source:             str
     batch_id:           str
@@ -362,7 +362,7 @@ class BronzeRecord:
         """
         key = {
             "symbol":   self.symbol,
-            "date":     str(self.date),
+            "bar_date": str(self.bar_date),
             "interval": self.interval,
         }
         if self.interval in RecordInterval.intraday_values():
@@ -449,7 +449,7 @@ class BronzeRecord:
         return {
             # GROUP 1
             "symbol":               self.symbol,
-            "date":                 str(self.date),
+            "bar_date":             str(self.bar_date),
             "interval":             self.interval,
             "source":               self.source,
             "batch_id":             self.batch_id,
@@ -571,9 +571,9 @@ class BronzeRecord:
         })
 
         # Convert date back from string if dataclasses.asdict converted it
-        if isinstance(current_dict["date"], str):
+        if isinstance(current_dict["bar_date"], str):
             from datetime import date as date_type
-            current_dict["date"] = date_type.fromisoformat(current_dict["date"])
+            current_dict["bar_date"] = date_type.fromisoformat(current_dict["bar_date"])
 
         # Remove has_corporate_action — will be re-derived in __post_init__
         current_dict.pop("has_corporate_action", None)
@@ -584,7 +584,7 @@ class BronzeRecord:
         return (
             f"BronzeRecord("
             f"symbol={self.symbol}, "
-            f"date={self.date}, "
+            f"bar_date={self.bar_date}, "
             f"interval={self.interval}, "
             f"close={self.close}, "
             f"source={self.source}, "
@@ -604,7 +604,7 @@ class RejectedRecord:
     Queryable, reprocessable, auditable.
     """
     symbol:             str
-    date:               str
+    bar_date:           str
     interval:           str
     source:             str
     batch_id:           str
@@ -627,7 +627,7 @@ class RejectedRecord:
     def to_dict(self) -> dict:
         return {
             "symbol":               self.symbol,
-            "date":                 self.date,
+            "bar_date":             self.bar_date,
             "interval":             self.interval,
             "source":               self.source,
             "batch_id":             self.batch_id,
@@ -650,7 +650,7 @@ class RejectedRecord:
         return (
             f"RejectedRecord("
             f"symbol={self.symbol}, "
-            f"date={self.date}, "
+            f"bar_date={self.bar_date}, "
             f"rule={self.rejected_rule}, "
             f"reason={self.rejection_reason}"
             f")"

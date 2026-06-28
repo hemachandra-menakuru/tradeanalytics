@@ -15,7 +15,7 @@ Standard OHLCV record format (all providers must return this):
   {
     # Identity
     "symbol":       str,       # e.g. "AAPL"
-    "date":         str,       # "YYYY-MM-DD" always
+    "bar_date":     str,       # "YYYY-MM-DD" always
     "interval":     str,       # "1d" | "1h" | "4h" | "5m" | "1m"
     "source":       str,       # provider name e.g. "ibkr"
 

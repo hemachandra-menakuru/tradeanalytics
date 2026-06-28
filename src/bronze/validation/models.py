@@ -118,7 +118,7 @@ class ValidationSummary:
         """Add an entry to the audit log."""
         self.audit_log.append({
             "symbol":       self.symbol,
-            "date":         record_date,
+            "bar_date":     record_date,
             "interval":     self.interval,
             "outcome":      outcome,
             "rule":         rule_name,

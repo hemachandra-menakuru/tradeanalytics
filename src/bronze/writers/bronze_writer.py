@@ -315,7 +315,7 @@ class BronzeWriter:
         """
         return (
             record.get("symbol"),
-            record.get("date"),
+            record.get("bar_date"),
             record.get("interval"),
             record.get("bar_time_utc"),  # None for daily
         )
@@ -431,7 +431,7 @@ class BronzeWriter:
 
         join_cond = (
             (table_df["symbol"]   == keys_df["_k_symbol"]) &
-            (table_df["date"].cast("string") == keys_df["_k_date"]) &
+            (table_df["bar_date"].cast("string") == keys_df["_k_date"]) &
             (table_df["interval"] == keys_df["_k_interval"]) &
             (
                 (table_df["bar_time_utc"].isNull() & keys_df["_k_bar_time"].isNull()) |
@@ -441,7 +441,7 @@ class BronzeWriter:
         matched_df = table_df.join(keys_df, on=join_cond, how="inner").select(table_df["*"])
 
         window_spec = Window.partitionBy(
-            "symbol", "date", "interval", "bar_time_utc"
+            "symbol", "bar_date", "interval", "bar_time_utc"
         ).orderBy(F.desc("record_version"))
 
         deduped_df = (

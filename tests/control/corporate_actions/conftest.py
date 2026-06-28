@@ -43,11 +43,11 @@ def instruments():
 # Synthetic Bronze price histories
 # ---------------------------------------------------------------------------
 
-def _bar(instrument_id, trade_date, close, record_version=1, open_=None):
+def _bar(instrument_id, bar_date, close, record_version=1, open_=None):
     """Helper: build a minimal bronze record dict."""
     return {
         "instrument_id":  instrument_id,
-        "trade_date":     trade_date,
+        "bar_date":       bar_date,
         "open":           open_ or close * 0.99,
         "high":           close * 1.01,
         "low":            close * 0.98,
@@ -137,7 +137,7 @@ def edge_case_prices():
 @pytest.fixture
 def duplicate_bronze_records():
     """
-    Same instrument_id + trade_date with multiple record_versions.
+    Same instrument_id + bar_date with multiple record_versions.
     The detector must use the LATEST record_version (dedup window).
     record_version=2 is the latest — that's the price to use.
     """
@@ -171,11 +171,11 @@ def corrupted_records():
     The pipeline must reject these gracefully — not crash or silently pass.
     """
     return [
-        {"instrument_id": None, "trade_date": date(2024, 1, 15), "close": 100.00},   # no instrument_id
-        {"instrument_id": 1001, "trade_date": None,              "close": 100.00},   # no date
-        {"instrument_id": 1001, "trade_date": date(2024, 1, 15), "close": None},     # no close price
-        {"instrument_id": 1001, "trade_date": date(2024, 1, 15), "close": "abc"},    # wrong type
-        {"instrument_id": 1001, "trade_date": "not-a-date",      "close": 100.00},   # invalid date string
+        {"instrument_id": None, "bar_date": date(2024, 1, 15), "close": 100.00},   # no instrument_id
+        {"instrument_id": 1001, "bar_date": None,              "close": 100.00},   # no date
+        {"instrument_id": 1001, "bar_date": date(2024, 1, 15), "close": None},     # no close price
+        {"instrument_id": 1001, "bar_date": date(2024, 1, 15), "close": "abc"},    # wrong type
+        {"instrument_id": 1001, "bar_date": "not-a-date",      "close": 100.00},   # invalid date string
         {},  # completely empty record
     ]
 

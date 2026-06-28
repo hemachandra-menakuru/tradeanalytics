@@ -427,7 +427,7 @@ try:
     """).collect()
 
     if dups:
-        dup_summary = ", ".join([f"{r['date']} ({r['cnt']}x)" for r in dups[:5]])
+        dup_summary = ", ".join([f"{r['bar_date']} ({r['cnt']}x)" for r in dups[:5]])
         _fail("step4_deduplication", f"Duplicate records found: {dup_summary}")
     else:
         count = spark.sql(f"""
@@ -684,7 +684,7 @@ else:
             _fail("step8_simulate_detection", "No pre-split records in Bronze to compute price ratio")
 
         bronze_price = float(pre_rows[0]["close"])
-        bronze_date  = pre_rows[0]["date"]
+        bronze_date  = pre_rows[0]["bar_date"]
 
         # Get the current Yahoo price for the same date (this will be the adjusted price)
         import yfinance as yf

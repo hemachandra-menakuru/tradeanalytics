@@ -4,7 +4,7 @@ OHLCVRecord TypedDict — enforced provider output contract.
 All providers must return List[OHLCVRecord]. Using a TypedDict makes field
 name typos surface as type errors rather than silent Spark schema mismatches.
 
-Key names match the Bronze Delta schema ("symbol", "date" — not "ticker", "trade_date").
+Key names match the Bronze Delta schema ("symbol", "bar_date" — not "ticker", "trade_date").
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ except ImportError:
 class OHLCVRecord(TypedDict, total=False):
     # Identity (required)
     symbol:   str
-    date:     str        # "YYYY-MM-DD"
+    bar_date: str        # "YYYY-MM-DD"
     interval: str        # "1d" | "1h" | "4h" | "5m" | "1m"
     source:   str        # provider name e.g. "ibkr"
 
