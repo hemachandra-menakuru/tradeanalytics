@@ -328,6 +328,10 @@ class BronzeIngestionJob:
         # Step 1: Read watermark — use instrument_id if available, else symbol fallback
         if ticker.instrument_id is not None and isinstance(self._watermark_mgr, DeltaWatermarkStore):
             watermark = self._watermark_mgr.get_watermark(ticker.instrument_id, stream)
+        elif isinstance(self._watermark_mgr, DeltaWatermarkStore):
+            # instrument_id=None (CSV path) + DeltaWatermarkStore — key types incompatible.
+            # Treat as first run; watermark will not be persisted for this ticker.
+            watermark = None
         else:
             watermark = self._watermark_mgr.get_watermark(symbol, interval)
 
@@ -465,8 +469,8 @@ class BronzeIngestionJob:
             symbol=symbol, interval=interval, table_name=self._stream_cfg.table,
         )
 
-        # Use instrument_id-keyed update when DeltaWatermarkStore is wired
         if instrument_id is not None and isinstance(self._watermark_mgr, DeltaWatermarkStore):
+            # Full path — instrument_id keyed, writes to control.ingestion_watermark
             self._watermark_mgr.update_watermark(
                 instrument_id=instrument_id,
                 stream=self._stream_name,
@@ -477,7 +481,15 @@ class BronzeIngestionJob:
                 mode=plan.mode.value,
                 status="success",
             )
+        elif isinstance(self._watermark_mgr, DeltaWatermarkStore):
+            # instrument_id=None (CSV path) + DeltaWatermarkStore — skip watermark update.
+            # Watermark will be written on next run when DeltaUniverseReader is used.
+            logger.warning(
+                f"[{symbol}] Skipping watermark update — instrument_id not available. "
+                "Use DeltaUniverseReader to enable watermark persistence."
+            )
         else:
+            # Legacy WatermarkManager path (symbol+interval key)
             self._watermark_mgr.update_watermark(
                 symbol=symbol,
                 interval=interval,

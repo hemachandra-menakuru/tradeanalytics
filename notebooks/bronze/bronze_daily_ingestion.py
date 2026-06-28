@@ -33,15 +33,25 @@ try:
     symbols_param    = dbutils.widgets.get("symbols").strip()
     dry_run_param    = dbutils.widgets.get("dry_run").strip().lower()
     as_of_date_param = dbutils.widgets.get("as_of_date").strip()
+    start_date_param = dbutils.widgets.get("start_date").strip()
+    end_date_param   = dbutils.widgets.get("end_date").strip()
 except Exception:
     symbols_param    = ""
     dry_run_param    = "false"
     as_of_date_param = ""
+    start_date_param = ""
+    end_date_param   = ""
 
 symbols    = [s.strip() for s in symbols_param.split(",") if s.strip()] or None
 dry_run    = dry_run_param == "true"
 as_of_date = date.fromisoformat(as_of_date_param) if as_of_date_param else None
-logger.info(f"Parameters: symbols={symbols}, dry_run={dry_run}, as_of_date={as_of_date}")
+start_date = date.fromisoformat(start_date_param) if start_date_param else None
+end_date   = date.fromisoformat(end_date_param)   if end_date_param   else None
+
+logger.info(
+    f"Parameters: symbols={symbols}, dry_run={dry_run}, "
+    f"as_of_date={as_of_date}, start_date={start_date}, end_date={end_date}"
+)
 
 # COMMAND ----------
 os.environ["IBKR_ACCOUNT_ID"] = dbutils.secrets.get("tradeanalytics", "IBKR_ACCOUNT_ID")
@@ -72,18 +82,37 @@ logger.info(
 )
 
 # COMMAND ----------
+# DeltaUniverseReader reads active instruments from reference.ticker_feed_config
+# (joined with instrument_listing and instrument) — populates instrument_id on each
+# InstrumentInfo object, enabling instrument_id-keyed watermarks.
+from src.reference.readers.delta_universe_reader import DeltaUniverseReader
+
+universe_reader = DeltaUniverseReader(
+    mode="spark",
+    spark=spark,
+    catalog=config.databricks.catalog,
+)
+logger.info(
+    f"Universe reader ready — "
+    f"{len(universe_reader.get_active_instruments(symbols=symbols))} active instruments"
+)
+
+# COMMAND ----------
 from src.bronze.jobs.bronze_ingestion_job import BronzeIngestionJob
 
 job = BronzeIngestionJob(
     config=config,
     stream_name="daily",
     spark=spark,
+    ticker_reader=universe_reader,
 )
 logger.info(f"Provider: {job._provider.provider_name}")
 
 summary = job.run(
     symbols=symbols,
     as_of_date=as_of_date,
+    start_date=start_date,
+    end_date=end_date,
     dry_run=dry_run,
 )
 
