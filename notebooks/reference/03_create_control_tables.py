@@ -138,32 +138,17 @@ print("✓ control.ingestion_batch_config")
 
 # COMMAND ----------
 
-from datetime import datetime
-
 existing = spark.sql("SELECT COUNT(*) as n FROM tradeanalytics.control.ingestion_batch_config").collect()[0]["n"]
 
 if existing == 0:
-    now = datetime.utcnow()
-    rows = [
-        ("daily",     "A,B",     500, True, "Priority instruments — runs Mon–Fri at 7pm Eastern",     now, now),
-        ("weekly",    "C,D",     500, True, "Secondary instruments — runs Saturday morning",           now, now),
-        ("on_demand", "A,B,C,D", 500, True, "Manual full run — processes all active batch groups",     now, now),
-    ]
-
-    from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType, TimestampType
-    schema = StructType([
-        StructField("job_type",              StringType(),    False),
-        StructField("batch_groups_included", StringType(),    False),
-        StructField("max_symbols_per_run",   IntegerType(),   False),
-        StructField("is_active",             BooleanType(),   False),
-        StructField("description",           StringType(),    True),
-        StructField("created_at",            TimestampType(), False),
-        StructField("updated_at",            TimestampType(), False),
-    ])
-
-    spark.createDataFrame(rows, schema=schema) \
-         .write.mode("append") \
-         .saveAsTable("tradeanalytics.control.ingestion_batch_config")
+    spark.sql("""
+        INSERT INTO tradeanalytics.control.ingestion_batch_config
+            (job_type, batch_groups_included, max_symbols_per_run, is_active, created_at, updated_at)
+        VALUES
+            ('daily',     'A,B',     500, true, current_timestamp(), current_timestamp()),
+            ('weekly',    'C,D',     500, true, current_timestamp(), current_timestamp()),
+            ('on_demand', 'A,B,C,D', 500, true, current_timestamp(), current_timestamp())
+    """)
     print("✓ Seeded 3 rows into control.ingestion_batch_config")
 else:
     print(f"✓ control.ingestion_batch_config already has {existing} rows — skipping seed")
