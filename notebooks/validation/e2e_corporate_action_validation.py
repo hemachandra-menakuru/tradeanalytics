@@ -190,9 +190,7 @@ else:
         config = ConfigLoader.load()
         MarketDataFactory.register("yahoo", YahooProvider)
 
-        universe_reader = DeltaUniverseReader(mode="spark", spark=spark, catalog=CATALOG)
-        job = BronzeIngestionJob(config=config, stream_name=STREAM, spark=spark,
-                                 ticker_reader=universe_reader)
+        job = BronzeIngestionJob(config=config, stream_name=STREAM, spark=spark)
         summary = job.run(
             symbols=[SYMBOL],
             start_date=PRE_SPLIT_START,
@@ -290,8 +288,7 @@ if DRY_RUN:
     _skip("step2_post_split_ingestion", "dry_run=true")
 else:
     try:
-        job2 = BronzeIngestionJob(config=config, stream_name=STREAM, spark=spark,
-                                  ticker_reader=DeltaUniverseReader(mode="spark", spark=spark, catalog=CATALOG))
+        job2 = BronzeIngestionJob(config=config, stream_name=STREAM, spark=spark)
         summary2 = job2.run(
             symbols=[SYMBOL],
             start_date=POST_SPLIT_START,
@@ -920,8 +917,7 @@ if DRY_RUN:
     _skip("step12_idempotency", "dry_run=true")
 else:
     try:
-        job3 = BronzeIngestionJob(config=config, stream_name=STREAM, spark=spark,
-                                  ticker_reader=DeltaUniverseReader(mode="spark", spark=spark, catalog=CATALOG))
+        job3 = BronzeIngestionJob(config=config, stream_name=STREAM, spark=spark)
         summary3 = job3.run(
             symbols=[SYMBOL],
             start_date=PRE_SPLIT_START,

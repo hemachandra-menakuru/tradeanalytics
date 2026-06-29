@@ -41,6 +41,7 @@ from src.bronze.models.ingestion_mode import FetchPlan, IngestionMode
 from src.bronze.models.ingestion_planner import IngestionPlanner
 from src.shared.base.universe_reader import UniverseReader, InstrumentInfo
 from src.reference.readers.ticker_reader import TickerReader, TickerInfo  # kept for backward compat
+from src.reference.readers.delta_universe_reader import DeltaUniverseReader
 from src.bronze.validation.validator import DataQualityValidator
 from src.bronze.writers.bronze_writer import BronzeWriter, BronzeWriteResult
 from src.bronze.writers.watermark_manager import WatermarkManager
@@ -165,7 +166,16 @@ class BronzeIngestionJob:
         schema  = config.databricks.schemas.bronze
 
         # Wire up components (inject or create defaults)
-        self._ticker_reader: UniverseReader = ticker_reader or TickerReader(config)
+        # Default: DeltaUniverseReader (reads from reference.ticker_feed_config via Spark)
+        # Tests inject TickerReader (CSV) or a mock via ticker_reader param
+        if ticker_reader is not None:
+            self._ticker_reader: UniverseReader = ticker_reader
+        elif spark is not None:
+            self._ticker_reader = DeltaUniverseReader(
+                mode="spark", spark=spark, catalog=catalog
+            )
+        else:
+            self._ticker_reader = TickerReader(config)  # local/test mode only
 
         self._validator = validator or DataQualityValidator.for_stream(
             config, stream_name
