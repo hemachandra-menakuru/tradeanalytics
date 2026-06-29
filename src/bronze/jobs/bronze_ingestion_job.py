@@ -40,6 +40,7 @@ from src.bronze.factory.provider_factory import MarketDataFactory
 from src.bronze.models.ingestion_mode import FetchPlan, IngestionMode
 from src.bronze.models.ingestion_planner import IngestionPlanner
 from src.shared.base.universe_reader import UniverseReader, InstrumentInfo
+from src.shared.base.data_provider import HistoricalDataProvider
 from src.reference.readers.ticker_reader import TickerReader, TickerInfo  # kept for backward compat
 from src.reference.readers.delta_universe_reader import DeltaUniverseReader
 from src.bronze.validation.validator import DataQualityValidator
@@ -191,7 +192,7 @@ class BronzeIngestionJob:
         )
 
         self._planner          = IngestionPlanner(config, stream_name)
-        self._provider         = MarketDataFactory.get_provider(config)
+        self._provider         = self._resolve_provider(config)
         self._pipeline_version = _get_pipeline_version()
 
         logger.info(
@@ -201,6 +202,27 @@ class BronzeIngestionJob:
             f"provider={self._provider.provider_name}, "
             f"pipeline_version={self._pipeline_version}"
         )
+
+    def _resolve_provider(self, config) -> HistoricalDataProvider:
+        """
+        Try primary provider (health check). Fall back to configured fallback
+        if primary is unreachable — e.g. IBKR gateway not running on this host.
+        """
+        primary = MarketDataFactory.get_provider(config)
+        try:
+            if primary.health_check():
+                logger.info(f"Provider resolved: {primary.provider_name} (primary)")
+                return primary
+        except Exception as e:
+            logger.warning(f"Primary provider {primary.provider_name} health check raised: {e}")
+
+        logger.warning(
+            f"Primary provider '{primary.provider_name}' unreachable — "
+            f"switching to fallback '{config.sources.fallback}'"
+        )
+        fallback = MarketDataFactory.get_fallback_provider(config)
+        logger.info(f"Provider resolved: {fallback.provider_name} (fallback)")
+        return fallback
 
     def run(
         self,
@@ -243,20 +265,6 @@ class BronzeIngestionJob:
             f"{len(tickers)} symbols, batch_id={batch_id}, "
             f"dry_run={dry_run}"
         )
-
-        # Provider health check before starting
-        if not dry_run and not self._provider.health_check():
-            logger.warning(
-                f"Primary provider {self._provider.provider_name} "
-                f"health check failed — trying fallback"
-            )
-            self._provider = MarketDataFactory.get_fallback_provider(
-                self._config
-            )
-            logger.info(
-                f"Switched to fallback provider: "
-                f"{self._provider.provider_name}"
-            )
 
         # interval is the primary interval for this stream — needed in
         # error handler below where _process_ticker may not have run yet

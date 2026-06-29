@@ -187,8 +187,6 @@ else:
         from src.bronze.providers.yahoo_provider import YahooProvider
 
         config = ConfigLoader.load()
-        # E2E notebook runs on cluster — IBKR gateway unreachable. Force yahoo.
-        config._data["sources"]["primary"] = "yahoo"
         MarketDataFactory.register("yahoo", YahooProvider)
 
         job = BronzeIngestionJob(config=config, stream_name=STREAM, spark=spark)
