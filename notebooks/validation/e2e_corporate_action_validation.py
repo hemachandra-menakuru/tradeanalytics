@@ -185,11 +185,14 @@ else:
         from src.bronze.jobs.bronze_ingestion_job import BronzeIngestionJob
         from src.bronze.factory.provider_factory import MarketDataFactory
         from src.bronze.providers.yahoo_provider import YahooProvider
+        from src.reference.readers.delta_universe_reader import DeltaUniverseReader
 
         config = ConfigLoader.load()
         MarketDataFactory.register("yahoo", YahooProvider)
 
-        job = BronzeIngestionJob(config=config, stream_name=STREAM, spark=spark)
+        universe_reader = DeltaUniverseReader(mode="spark", spark=spark, catalog=CATALOG)
+        job = BronzeIngestionJob(config=config, stream_name=STREAM, spark=spark,
+                                 ticker_reader=universe_reader)
         summary = job.run(
             symbols=[SYMBOL],
             start_date=PRE_SPLIT_START,
@@ -287,7 +290,8 @@ if DRY_RUN:
     _skip("step2_post_split_ingestion", "dry_run=true")
 else:
     try:
-        job2 = BronzeIngestionJob(config=config, stream_name=STREAM, spark=spark)
+        job2 = BronzeIngestionJob(config=config, stream_name=STREAM, spark=spark,
+                                  ticker_reader=DeltaUniverseReader(mode="spark", spark=spark, catalog=CATALOG))
         summary2 = job2.run(
             symbols=[SYMBOL],
             start_date=POST_SPLIT_START,
@@ -916,7 +920,8 @@ if DRY_RUN:
     _skip("step12_idempotency", "dry_run=true")
 else:
     try:
-        job3 = BronzeIngestionJob(config=config, stream_name=STREAM, spark=spark)
+        job3 = BronzeIngestionJob(config=config, stream_name=STREAM, spark=spark,
+                                  ticker_reader=DeltaUniverseReader(mode="spark", spark=spark, catalog=CATALOG))
         summary3 = job3.run(
             symbols=[SYMBOL],
             start_date=PRE_SPLIT_START,
