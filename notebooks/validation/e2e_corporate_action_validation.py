@@ -185,7 +185,6 @@ else:
         from src.bronze.jobs.bronze_ingestion_job import BronzeIngestionJob
         from src.bronze.factory.provider_factory import MarketDataFactory
         from src.bronze.providers.yahoo_provider import YahooProvider
-        from src.reference.readers.delta_universe_reader import DeltaUniverseReader
 
         config = ConfigLoader.load()
         MarketDataFactory.register("yahoo", YahooProvider)
