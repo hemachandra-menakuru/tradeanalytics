@@ -3,8 +3,12 @@
 # Change provider here — affects daily, intraday, and tick equally
 
 sources:
-  primary: ibkr
-  fallback: yahoo
+  primary: ibkr           # kept for backward compat — first in priority list
+  fallback: yahoo         # kept for backward compat — last resort
+  priority:               # tried in order until one passes health_check()
+    - ibkr                # live trading — local Mac only (localhost:5055)
+    - polygon             # cloud-friendly historical — add POLYGON_API_KEY to use
+    - yahoo               # last resort — unofficial, no API key required
 
   ibkr:
     base_url: https://localhost:5055/v1/api

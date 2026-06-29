@@ -205,24 +205,24 @@ class BronzeIngestionJob:
 
     def _resolve_provider(self, config) -> HistoricalDataProvider:
         """
-        Try primary provider (health check). Fall back to configured fallback
-        if primary is unreachable — e.g. IBKR gateway not running on this host.
+        Walk the priority list from config.sources.priority, health-check each,
+        and return the first one that responds. Works for any number of providers —
+        adding a new source = add it to sources.yml priority list, implement ABC.
         """
-        primary = MarketDataFactory.get_provider(config)
-        try:
-            if primary.health_check():
-                logger.info(f"Provider resolved: {primary.provider_name} (primary)")
-                return primary
-        except Exception as e:
-            logger.warning(f"Primary provider {primary.provider_name} health check raised: {e}")
+        chain = MarketDataFactory.get_provider_chain(config)
+        for provider in chain:
+            try:
+                if provider.health_check():
+                    logger.info(f"Provider resolved: {provider.provider_name}")
+                    return provider
+                logger.warning(f"Provider '{provider.provider_name}' health check failed — trying next")
+            except Exception as e:
+                logger.warning(f"Provider '{provider.provider_name}' health check raised: {e} — trying next")
 
-        logger.warning(
-            f"Primary provider '{primary.provider_name}' unreachable — "
-            f"switching to fallback '{config.sources.fallback}'"
+        raise RuntimeError(
+            f"No available provider. Tried: {[p.provider_name for p in chain]}. "
+            f"Check config/sources.yml priority list and provider credentials."
         )
-        fallback = MarketDataFactory.get_fallback_provider(config)
-        logger.info(f"Provider resolved: {fallback.provider_name} (fallback)")
-        return fallback
 
     def run(
         self,
