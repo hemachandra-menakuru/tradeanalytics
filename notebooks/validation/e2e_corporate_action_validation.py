@@ -32,6 +32,11 @@
 # MAGIC The final cell prints a complete summary table.
 
 # COMMAND ----------
+# Install dependencies not pre-installed on Databricks clusters
+# Must be the first executable cell — restarts the Python kernel after install
+%pip install python-dotenv
+
+# COMMAND ----------
 # MAGIC %md
 # MAGIC ## Widgets
 
