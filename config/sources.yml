@@ -6,12 +6,18 @@ sources:
   primary: ibkr           # kept for backward compat — first in priority list
   fallback: yahoo         # kept for backward compat — last resort
   priority:               # tried in order until one passes health_check()
-    - ibkr                # live trading — local Mac only (localhost:5055)
+    - ibkr                # Client Portal REST — local Mac only (localhost:5055)
+    - ibinsync            # IB Gateway socket — EC2 proxy (54.197.158.82:4002)
     - polygon             # cloud-friendly historical — add POLYGON_API_KEY to use
     - yahoo               # last resort — unofficial, no API key required
 
   ibkr:
-    base_url: https://localhost:5055/v1/api
+    gateway_mode: ec2         # local | ec2  — change this one line to switch gateway
+    gateways:
+      local:
+        base_url: https://localhost:5055/v1/api
+      ec2:
+        base_url: http://54.197.158.82:4002/v1/api
     verify_ssl: false
     timeout_seconds: 30
     max_retries: 3
@@ -19,6 +25,18 @@ sources:
     account_id: ""              # injected from .env (IBKR_ACCOUNT_ID)
     username: ""                # injected from .env (IBKR_USERNAME)
     password: ""                # injected from .env (IBKR_PASSWORD)
+
+  ibinsync:
+    gateway_mode: ec2           # local | ec2  — change this one line to switch gateway
+    client_id: 10               # IB Gateway client ID (1-32; use different IDs for simultaneous connections)
+    timeout_seconds: 30
+    gateways:
+      local:
+        host: 127.0.0.1
+        port: 4002              # IB Gateway paper port (4001 = live)
+      ec2:
+        host: 54.197.158.82
+        port: 4004              # IB Gateway paper port on EC2 (gnzsnz image uses 4004)
 
   yahoo:
     timeout_seconds: 30

@@ -15,7 +15,7 @@
 | GitHub | `hemachandra-menakuru/tradeanalytics` (private) |
 | Claude Project | `handh_tradeanalytics` |
 | AWS Account | `311925399625`, region `us-east-1` |
-| Databricks | `dbc-bf0075e6-07aa.cloud.databricks.com`, workspace `handh-dev` |
+| Databricks | `dbc-46a555ac-7f7b.cloud.databricks.com`, workspace `handh-dev` (BYO VPC, no NAT, 2026-06-29) |
 | Unity Catalog | `tradeanalytics` |
 | Bronze schema | `tradeanalytics.bronze` |
 | DABs profile | `handh-trade-aws` |
@@ -395,8 +395,8 @@ job_name:   "[dev handh_stocks] [dev] Bronze Daily Ingestion"
 job_id:     174217366433843
 schedule:   "0 0 19 * * ?" (7pm Eastern Mon-Fri)
 status:     PAUSED
-policy_id:  001B2429FBD0E8AD
-cluster:    m5.xlarge, 1 worker, SPOT_WITH_FALLBACK
+policy_id:  001DC683697F1238
+cluster:    m5.xlarge, 1 worker, SPOT_WITH_FALLBACK (ID: 0629-032019-xkdutyxc)
 smoke_test_params:
   symbols:    "SPY"
   start_date: "2026-06-16"
@@ -486,6 +486,18 @@ src/shared/
 ---
 
 ## 10. Known Issues & Technical Debt
+
+### ⚠️ MUST FIX BEFORE EXITING PHASE 3A — `e2e_corporate_action_validation` notebook blocked
+`notebooks/validation/e2e_corporate_action_validation.py` cannot run — blocked on Databricks
+cluster availability. Root cause: BYO VPC migration (2026-06-29) broke cluster bootstrap.
+New workspaces have **Secure Cluster Connectivity (SCC) mandatory** — EC2 nodes never get
+public IPs even in public subnets, so without NAT or an SCC relay VPC endpoint, nodes can't
+reach the Databricks control plane to bootstrap (`BOOTSTRAP_TIMEOUT` after ~700s).
+Email sent to Databricks support (2026-06-30) asking for a no-NAT / low-cost alternative,
+budget options, and whether this is AWS-specific vs also applies to Azure/GCP. Awaiting reply.
+Interim fix available: single NAT Gateway (~$16/month, one AZ) — not yet applied, pending
+Databricks' response. **This notebook must successfully run before Phase 3A is considered closed.**
+All 93 corporate actions pytest unit tests pass — this is purely the cluster-based E2E validation step.
 
 ### ⚠️ Date range override not working (investigate before next smoke test)
 `start_date`/`end_date` params passed to `job.run()` but IBKR returned full 10yr
@@ -765,11 +777,98 @@ Feature store: `tradeanalytics.feature_store.*`
 
 1. Upload this `CLAUDE.md` file first
 2. Confirm: any changes since last session?
-3. Run `/Users/hemachandra/anaconda3/envs/tradeanalytics/bin/python -m pytest tests/ -q` — confirm 405 tests passing (402 + 3 new corporate actions tests) on branch `feature/phase3-silver`
+3. Run `/Users/hemachandra/anaconda3/envs/tradeanalytics/bin/python -m pytest tests/ -q` — confirm 402 passed, 3 skipped on branch `feature/phase3-silver` (all pytest unit tests pass, including 93 corporate actions tests). Note: `notebooks/validation/e2e_corporate_action_validation.py` is a separate cluster-based notebook (not part of the pytest suite) — see Known Issues below, blocked on Databricks cluster availability.
 4. State the immediate task
 5. **Next up: Phase 3 (Silver — feature engineering, step-by-step teaching)**
 
 ## 14. Ops Runbook — Known Gotchas
+
+## Infrastructure Decision: Serverless-Only, No Always-On AWS Compute
+
+**Decision date:** 2026-06-30
+**Status:** Active
+
+### Summary
+TradeAnalytics runs exclusively on Databricks Serverless (Notebooks, Workflows,
+SQL Warehouses where unavoidable). We do NOT provision or run classic
+all-purpose / job clusters that require a VPC + NAT Gateway. This avoids the
+~$32/month flat NAT Gateway idle cost and any persistent EC2 cluster spend.
+
+### What this means in practice
+- All Databricks Workflows must target **Serverless compute**, not classic
+  clusters. Do not set `node_type_id` / `num_workers` in job cluster configs
+  in DABs YAML — omit cluster blocks entirely and use the `serverless: true`
+  equivalent for the workflow/task.
+- No standing AWS VPC, NAT Gateway, or Elastic IP should exist purely to
+  support Databricks compute. If a NAT Gateway shows up in the AWS bill,
+  treat it as a misconfiguration to investigate, not an accepted cost.
+- SQL Editor / SQL Warehouse usage is **interactive/ad-hoc only** — prefer
+  Serverless Notebooks with `%sql` magic for routine querying, since SQL
+  Warehouses run at a higher DBU rate. Reserve SQL Warehouses for cases that
+  specifically need the SQL Editor UI or BI-style concurrency.
+- When configuring a SQL Warehouse is unavoidable: size it 2X-Small/X-Small,
+  set Auto-Termination to 1 minute.
+
+### Exception: IBKR EC2 Proxy
+The one persistent EC2 resource we keep running is the small instance
+(t3.small / t4g.small) hosting the Dockerized IB Gateway, because IBKR
+requires a fixed whitelisted IP and Databricks Serverless egresses through a
+rotating IP pool. This is a deliberate, isolated exception — not classic
+Databricks cluster infrastructure — and should stay a single minimal-spec
+instance with a single Elastic IP. Do not stand up any other always-on AWS
+compute alongside it.
+
+### Cost guardrails
+- No Reserved Instances, Savings Plans, or multi-instance EC2 commitments
+  without explicit sign-off — the only persistent compute should be the
+  single IBKR proxy box above.
+- Zero-spend AWS Budget alert should remain active; any NAT Gateway, idle
+  Elastic IP, or classic cluster appearing in billing is a signal to revisit
+  this section.
+
+### Rationale (for context, not to be re-debated casually)
+Evaluated migrating to GCP for lower NAT/idle infra cost; decided against it
+given the AWS-shaped IBKR proxy, Unity Catalog metastore lock-in, and IAM
+rework cost outweighing the marginal savings on a small VM. Revisit only if
+a concrete GCP-specific need arises (not pure cost optimization).
+
+### ⚠️ Supersedes the BYO VPC classic-cluster effort below
+This decision means the BYO VPC + classic interactive cluster work documented
+in this section (2026-06-29) is **no longer the path forward** for compute.
+The cluster bootstrap blocker (SCC mandatory, see Known Issues Section 10) is
+moot under this decision — we do not need a classic cluster to bootstrap at
+all. The `e2e_corporate_action_validation` notebook and any other
+cluster-dependent workflow must be re-evaluated to run on **Serverless**
+compute instead of an all-purpose/job cluster. The VPC/subnet/IGW network
+infrastructure described below remains in place only to support the IBKR EC2
+proxy exception above — not for Databricks compute.
+
+### AWS Network Architecture (post BYO VPC migration 2026-06-29)
+
+**Current state — zero NAT Gateways:**
+- VPC: `vpc-08931caf43fb6812e` (`handh-trade-vpc`, 10.0.0.0/16)
+- Subnets: `subnet-08b8c3ae16006527b` (us-east-1a, public) + `subnet-0f5c5082ad4cf2cdf` (us-east-1b, public)
+- Routing: `0.0.0.0/0 → igw-0dc265bf5839530a0` (Internet Gateway, free)
+- Security group: `sg-0834eda51f5fd5b7c` (`handh-trade-dbx-sg`)
+- Databricks network config: `handh-trade-byo-vpc`
+- NAT Gateways: **NONE** — savings ~$384/year
+- Metastore ID: `920e9d50-8b93-4bf4-9c1a-db07cc9f1971` (account-level, survives workspace recreation)
+- Storage credential IAM role: `arn:aws:iam::311925399625:role/handh-trade-databricks-role`
+
+**Why BYO VPC eliminates NAT:**
+Databricks Classic (default) creates private subnets + NAT in your AWS account.
+BYO VPC with public subnets gives EC2 worker nodes public IPs — they route via IGW directly.
+IBKR has zero impact on this choice: IBKR runs on local Mac only; EC2 workers never touch it.
+
+**If workspace ever needs to be recreated:**
+1. Go to `accounts.cloud.databricks.com` → Cloud resources → Network configurations
+2. Select `handh-trade-byo-vpc` (already exists — reuse it)
+3. Create workspace with same storage + credential + network config
+4. Metastore auto-attaches — all Delta data in S3 survives untouched
+
+**Updated setup guides:**
+- `TradeAnalytics_AWS_Setup_Guide_v2.docx` — Section 10: NAT elimination + BYO VPC
+- `TradeAnalytics_Databricks_Setup_Guide_v4.docx` — Section 8: BYO VPC migration steps
 
 ### After `databricks bundle deploy` — cluster module cache
 Databricks clusters cache Python `.pyc` bytecode in memory. Deploying new code via

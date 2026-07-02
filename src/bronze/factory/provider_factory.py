@@ -98,6 +98,7 @@ class MarketDataFactory:
         # Always load both providers exactly once — regardless of manual registrations.
         # A partial registry (e.g. only yahoo registered manually) must not block ibkr loading.
         if not cls._providers_loaded:
-            from src.bronze.providers import ibkr_provider   # noqa
-            from src.bronze.providers import yahoo_provider  # noqa
+            from src.bronze.providers import ibkr_provider      # noqa
+            from src.bronze.providers import yahoo_provider     # noqa
+            from src.bronze.providers import ibinsync_provider  # noqa
             cls._providers_loaded = True

@@ -14,7 +14,7 @@ targets:
     mode: development
     default: true
     workspace:
-      host: https://dbc-bf0075e6-07aa.cloud.databricks.com
+      host: https://dbc-46a555ac-7f7b.cloud.databricks.com
       profile: handh-trade-aws
     variables:
       env: dev
@@ -56,7 +56,7 @@ resources:
             spark_version: "15.4.x-scala2.12"
             node_type_id: "m5.xlarge"
             num_workers: 1
-            policy_id: "001B2429FBD0E8AD"
+            policy_id: "001DC683697F1238"
             aws_attributes:
               availability: SPOT_WITH_FALLBACK
               first_on_demand: 1
@@ -106,7 +106,7 @@ resources:
             spark_version: "15.4.x-scala2.12"
             node_type_id: "m5.xlarge"
             num_workers: 1
-            policy_id: "001B2429FBD0E8AD"
+            policy_id: "001DC683697F1238"
             aws_attributes:
               availability: SPOT_WITH_FALLBACK
               first_on_demand: 1

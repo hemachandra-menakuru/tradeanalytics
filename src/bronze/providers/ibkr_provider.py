@@ -85,7 +85,8 @@ class IBKRProvider(MarketDataProvider):
 
     def __init__(self, config: ConfigNode):
         super().__init__(config)
-        self._base_url    = config.sources.ibkr.base_url
+        gateway_mode      = getattr(config.sources.ibkr, "gateway_mode", "local")
+        self._base_url    = getattr(config.sources.ibkr.gateways, gateway_mode).base_url
         self._verify_ssl  = config.sources.ibkr.verify_ssl
         self._timeout     = config.sources.ibkr.timeout_seconds
         self._max_retries = config.sources.ibkr.max_retries
