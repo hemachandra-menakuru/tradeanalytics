@@ -71,19 +71,22 @@ class IBInsyncProvider(HistoricalDataProvider):
     def __init__(self, config: ConfigNode):
         super().__init__(config)
 
-        cfg = config.sources.ibinsync
-        gateway_mode  = getattr(cfg, "gateway_mode", "ec2")
-        gateway_cfg   = getattr(cfg.gateways, gateway_mode)
-        self._host    = gateway_cfg.host
-        self._port    = int(gateway_cfg.port)
-        self._timeout = getattr(cfg, "timeout_seconds", 30)
-        self._client_id = getattr(cfg, "client_id", 10)
+        cfg               = config.sources.ibinsync
+        gateway_mode      = getattr(cfg, "gateway_mode", "ec2")
+        self._trading_mode = getattr(cfg, "trading_mode", "paper")
+        gateway_cfg       = getattr(cfg.gateways, gateway_mode)
+        self._host        = gateway_cfg.host
+        port_key          = f"port_{self._trading_mode}"   # port_paper or port_live
+        self._port        = int(getattr(gateway_cfg, port_key))
+        self._timeout     = getattr(cfg, "timeout_seconds", 30)
+        self._client_id   = getattr(cfg, "client_id", 10)
 
         self._ib = None  # lazy-connect on first use
 
         logger.info(
             f"IBInsyncProvider initialised — "
-            f"gateway_mode={gateway_mode}, host={self._host}, port={self._port}"
+            f"gateway_mode={gateway_mode}, trading_mode={self._trading_mode}, "
+            f"host={self._host}, port={self._port}"
         )
 
     # ── Provider identity ──────────────────────────────────────────────────────

@@ -888,9 +888,63 @@ IBKR are both unreachable. Always use the regular cluster for notebook-based ing
 |---|---|---|---|
 | Regular cluster (notebook) | ❌ | ✅ | ✅ restart after deploy |
 | Serverless (notebook) | ❌ | ❌ | ✅ always fresh |
-| Databricks Connect (local Mac) | ✅ | ✅ | ✅ always fresh |
+| Databricks Connect (local Mac) | ✅ (localhost:5055) | ✅ | ✅ always fresh |
+| Databricks Connect (EC2 proxy) | ✅ (54.197.158.82:4004) | ✅ | ✅ always fresh |
 
-**Production ingestion** must use Databricks Connect from local Mac — only path with IBKR access.
+**Production ingestion** uses Databricks Connect — either via local Mac gateway or EC2 proxy.
+
+---
+
+### IBKR EC2 Proxy — Full Reference (built 2026-07-02)
+
+**Infrastructure:**
+| Item | Value |
+|---|---|
+| Instance | `i-04eba7d6e9f3c6f28`, t4g.small (ARM/Graviton), Ubuntu 22.04 LTS |
+| Elastic IP | `54.197.158.82` (permanent) |
+| Security group | `sg-0bda28a18bc5bb48a` (`handh-trade-ibkr-sg`) |
+| SSH key | `~/.ssh/handh-trade-ibkr-proxy.pem` |
+| Compose file | `~/ibkr-gateway/docker-compose.yml` on the instance |
+| Docker image | `gnzsnz/ib-gateway:stable` |
+| API port | **4004** (paper) — NOT 4002; gnzsnz image uses 4004 |
+| VNC port | 5900 — for visual debugging only |
+| Trading mode | paper (`hcmpaper123` / `DUR152323`) |
+
+**Security group ports allowed (locked to owner IP only):**
+| Port | Purpose |
+|---|---|
+| 22 | SSH |
+| 4004 | IB Gateway socket API (paper) |
+| 5900 | VNC |
+
+**Provider:**
+- `IBInsyncProvider` (`src/bronze/providers/ibinsync_provider.py`) — uses `ib_insync` socket protocol
+- Switch gateway: `config/sources.yml` → `sources.ibinsync.gateway_mode: local | ec2`
+- Priority chain: `ibkr (REST) → ibinsync (socket) → polygon → yahoo`
+- Verified: fetched real SPY OHLCV data 2026-06-16→17 ✅
+
+**VNC access (visual debugging):**
+- Mac Finder → Go → Connect to Server (⌘K) → `vnc://54.197.158.82:5900`
+- Green dashboard = connected; shows API Server, Market Data Farm, Historical Data Farm
+
+**Key gotchas (hard-won — do not repeat these mistakes):**
+1. **Protocol:** gnzsnz image runs IB Gateway **socket API** (TWS protocol), NOT Client Portal REST. Use `ib_insync`, never `urllib`/`requests` against port 4004.
+2. **Port:** gnzsnz image uses **4004** for paper, not the standard 4002 in IBKR docs. Always verify: `docker exec ibkr-gateway cat /proc/net/tcp | awk '{print $2}' | grep -v local | while read h; do printf '%d\n' 0x${h#*:}; done | sort -nu`
+3. **TrustedIPs:** IB Gateway only trusts 127.0.0.1 by default. Edit the **template** (not live file — it gets regenerated on restart): `docker exec ibkr-gateway sed -i 's/TrustedTwsApiClientIPs=/TrustedTwsApiClientIPs=*/' /home/ibgateway/ibc/config.ini.tmpl`
+4. **Port mapping:** `docker compose restart` does NOT apply port changes. Always use `docker compose down && docker compose up -d` when changing ports.
+5. **Login failure on first start:** If paper account was recently created, IBKR may show "Application In Progress" — wait for IBKR to process (next business day), then restart container.
+
+**Switching from paper to live (when Phase 5 is ready):**
+
+| Change | What to do |
+|---|---|
+| `.env` on EC2 | Update `TWS_USERID` / `TWS_PASSWORD` to live credentials |
+| `docker-compose.yml` | Change `TRADING_MODE: paper` → `TRADING_MODE: live` and port `4004` → `4001` |
+| `config/sources.yml` | Change `ibinsync.gateways.ec2.port: 4004` → `4001` |
+| Security group | Add port 4001 rule; remove port 4004 rule (or keep both during transition) |
+| Credential storage | Store live credentials in AWS Secrets Manager (not .env) — live money warrants stronger protection |
+
+**⚠️ Never put live trading credentials in `.env` on the EC2 box.** The `.env` approach is acceptable for paper (demo money). For live trading, use AWS Secrets Manager + IAM role to inject credentials at runtime. This is a hard requirement before Phase 5.
 ## Project State — June 2026
 
 ---

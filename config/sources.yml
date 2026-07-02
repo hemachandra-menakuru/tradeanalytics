@@ -27,16 +27,19 @@ sources:
     password: ""                # injected from .env (IBKR_PASSWORD)
 
   ibinsync:
-    gateway_mode: ec2           # local | ec2  — change this one line to switch gateway
+    gateway_mode: ec2           # local | ec2  — which gateway to connect to
+    trading_mode: paper         # paper | live — must match TRADING_MODE in EC2 .env
     client_id: 10               # IB Gateway client ID (1-32; use different IDs for simultaneous connections)
     timeout_seconds: 30
     gateways:
       local:
         host: 127.0.0.1
-        port: 4002              # IB Gateway paper port (4001 = live)
+        port_paper: 4002        # IB Gateway paper port (local)
+        port_live: 4001         # IB Gateway live port (local)
       ec2:
         host: 54.197.158.82
-        port: 4004              # IB Gateway paper port on EC2 (gnzsnz image uses 4004)
+        port_paper: 4004        # IB Gateway paper port on EC2 (gnzsnz image uses 4004)
+        port_live: 4001         # IB Gateway live port on EC2
 
   yahoo:
     timeout_seconds: 30
