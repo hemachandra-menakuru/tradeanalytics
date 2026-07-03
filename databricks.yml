@@ -21,6 +21,47 @@ targets:
 
 resources:
   jobs:
+    fetch_planner:
+      name: "[${var.env}] Fetch Planner (Two-Plane)"
+      description: "Derives per-instrument fetch plans and emits control.fetch_request rows + S3 manifests for the EC2 bridge agent. CLAUDE.md §14."
+
+      schedule:
+        quartz_cron_expression: "0 0 19 * * MON-FRI"
+        timezone_id: "America/New_York"
+        pause_status: PAUSED          # unpause after first supervised end-to-end run
+
+      email_notifications:
+        on_failure:
+          - handh.stocks@gmail.com
+
+      tasks:
+        - task_key: fetch_planner
+          notebook_task:
+            notebook_path: "notebooks/control/fetch_planner.py"
+            base_parameters:
+              symbols:     ""          # blank = all active instruments
+              dry_run:     "false"
+              as_of_date:  ""
+              environment: "${var.env}"
+          environment_key: serverless_env
+          timeout_seconds: 1800
+          max_retries: 1
+
+      max_concurrent_runs: 1
+
+      environments:
+        - environment_key: serverless_env
+          spec:
+            client: "2"
+            dependencies:
+              - pyyaml
+              - python-dotenv
+      tags:
+        project:    tradeanalytics
+        layer:      control
+        phase:      "3"
+        managed_by: dabs
+
     bronze_daily_ingestion:
       name: "[${var.env}] Bronze Daily Ingestion"
       description: "Ingests daily OHLCV market data from IBKR into Bronze Delta tables"
