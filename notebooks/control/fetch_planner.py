@@ -7,6 +7,12 @@
 # This job fetches nothing and needs no network egress.
 
 # COMMAND ----------
+# MAGIC %pip install --quiet pyyaml python-dotenv
+
+# COMMAND ----------
+# MAGIC %restart_python
+
+# COMMAND ----------
 import os, sys, logging
 from datetime import date
 
