@@ -866,9 +866,9 @@ IBKR has zero impact on this choice: IBKR runs on local Mac only; EC2 workers ne
 3. Create workspace with same storage + credential + network config
 4. Metastore auto-attaches — all Delta data in S3 survives untouched
 
-**Updated setup guides:**
-- `TradeAnalytics_AWS_Setup_Guide_v2.docx` — Section 10: NAT elimination + BYO VPC
-- `TradeAnalytics_Databricks_Setup_Guide_v4.docx` — Section 8: BYO VPC migration steps
+**Updated setup guides (in ~/Downloads):**
+- `TradeAnalytics_AWS_Setup_Guide_v3.docx` — §10 NAT elimination + BYO VPC; §4.3.1 IBKR EC2 proxy + raw landing zone (added 2026-07-04)
+- `TradeAnalytics_Databricks_Setup_Guide_v5.docx` — §8 BYO VPC migration; §5.2 SUPERSEDED note + §5.4 Two-Plane Architecture (added 2026-07-04)
 
 ### After `databricks bundle deploy` — cluster module cache
 Databricks clusters cache Python `.pyc` bytecode in memory. Deploying new code via
@@ -894,6 +894,108 @@ IBKR are both unreachable. Always use the regular cluster for notebook-based ing
 **Production ingestion** uses Databricks Connect — either via local Mac gateway or EC2 proxy.
 
 ---
+
+### ARCHITECTURE DECISION — Bronze Ingestion via Pull-Based Bridge (2026-07-03)
+
+**Locked principles (HC, 2026-07-03):** EC2's only responsibility is connectivity to
+IBKR/external sources. Databricks owns ALL ingestion, processing, orchestration, and
+loading. Do not deviate without a critical technical limitation.
+
+**Critical technical limitation found (empirically, twice):** Databricks Serverless in
+this account has ZERO outbound egress — no DNS, no internet — even with the egress
+policy at Full access AND an NCC (`handh-trade-ncc`) created and attached to the
+workspace (verified via `notebooks/ops/connectivity_test.py` on fresh serverless
+sessions, 2026-07-03). Serverless can never initiate a connection to the EC2 gateway.
+
+**Decision: Strategy B — pull-based bridge.** Databricks cannot push to EC2, so EC2
+pulls work from Databricks-owned state. Databricks remains the single control plane.
+
+```
+① PLANNER JOB (serverless, cron 7pm ET Mon–Fri, databricks.yml)
+   IngestionPlanner: desired (ticker_feed_config) vs actual (ingestion_watermark),
+   consumes pending ingestion_command rows (operator one-offs)
+   → INSERT control.fetch_request rows (PENDING; source of truth, audit)
+   → PUT one manifest JSON per request → s3://handh-trade-raw-use1/control/pending/
+   Chunking (e.g. 1-year slices for INITIAL_LOAD) happens HERE — agent stays dumb.
+
+② EC2 BRIDGE AGENT (systemd, ~200 lines: ib_insync + boto3 only, NO src/ deploy)
+   Polls S3 control/pending/ (~60s; costs cents/month, touches no Databricks compute)
+   → fetch from IB Gateway localhost:4004 → land RAW payload to
+   s3://handh-trade-raw-use1/ibkr/… → move manifest to control/done/ (or failed/)
+   Stateless courier: no validation, no schemas, no watermarks, no business logic.
+
+③ INGESTION JOB (serverless) reads landed raw files → DataQualityValidator →
+   BronzeWriter (append-only, 3-layer dedup) → watermark → job_run_log →
+   reconcile fetch_request statuses.
+
+④ MONITOR (Databricks): requests stuck PENDING/FETCHING > threshold → alert.
+```
+
+**Key properties:** SG stays 100% closed (all arrows point outward from EC2);
+raw payloads preserved in s3://…/ibkr/ (original AWS guide §4.3 plan — Bronze
+reprocessable without re-calling IBKR); `ingestion_command` keeps its designed
+operator-only semantics (planner consumes it; NEW table `control.fetch_request`
+is the work queue); EC2 agent has no repo deploy — single small script.
+
+**Rejected: Strategy A (direct serverless→EC2 via NCC stable IPs + SG whitelist).**
+Blocked by the egress limitation above. Also had a security flaw: IB Gateway socket
+API is unauthenticated and NCC default egress IPs are shared regional Databricks IPs.
+If serverless egress ever becomes available, A is a ~1-day migration (same provider
+code; only the initiator changes) — re-evaluate only then. NCC stays attached (free).
+
+### PLATFORM ARCHITECTURE — Two-Plane Design (decided 2026-07-04)
+
+Extends the 2026-07-03 pull-based-bridge decision from ingestion-only to the ENTIRE
+platform lifecycle (ingestion → signals → publishing → LLM enrichment → execution).
+
+**Driving constraints (both permanent):**
+1. Databricks Serverless in this account cannot initiate ANY outbound connection
+   (verified 2026-07-03; known unresolved platform issue; egress control is
+   Enterprise-tier, workspace is Premium; no support contract).
+2. Independent of egress: Spark batch jobs are the wrong runtime for stateful,
+   latency-sensitive external interaction (OrderManager, KillSwitch, PortfolioState
+   are specified as stateful single-instance components — they need a persistent
+   process, not a batch engine). Execution never belonged in Databricks.
+
+**THE PATTERN (one idiom for every external interaction, all phases):**
+Databricks writes intent (Delta control table row + S3 manifest) →
+agent on the connectivity plane polls, executes against the external world,
+lands results in S3/Delta → Databricks validates, records, monitors.
+All arrows point OUTWARD from the agent plane. SG never opens inbound.
+Databricks never needs egress. The Delta+S3 contract is the ONLY boundary.
+
+**Plane 1 — Data & Intelligence (Databricks Serverless):**
+Bronze/Silver/Gold, feature engineering, XGBoost/MLflow, signal generation,
+SignalQualityEngine, SignalLog, backtesting, planners & monitors.
+LLM option without egress: Databricks Foundation Model APIs (in-platform).
+Alerting: native job email notifications (control-plane sent — works today).
+
+**Plane 2 — Connectivity & Execution (our VPC, AWS-native, tiny):**
+| Phase | Agent | Runs on |
+|---|---|---|
+| 2-3 (now) | IB Gateway + fetch agent (fetch_request pattern) | existing t4g.small |
+| 4b | publisher agent (Telegram / signal API push) | same box |
+| 4 | LLM enrichment agent (external AI APIs, async batch) | same box |
+| 5 | execution agent (ib_insync orders, OrderManager, KillSwitch) | own instance/Fargate + Secrets Manager (hard gate before live) |
+Monitoring: CloudWatch alarms + SNS on agents. IAM instance roles, no keys on disk.
+
+**Rejected alternatives:** fight for serverless egress (unreliable, tier-gated,
+shared-IP security hole vs unauthenticated broker socket); classic compute (NAT
+cost + SCC blocker + reverses serverless-only decision); all-AWS without
+Databricks (rebuilds UC/MLflow/Delta for nothing at this scale).
+
+**Future flexibility:** if serverless egress ever works → any agent can become a
+direct call with zero contract change. Agent outgrows the box → move to
+ECS Fargate, contract unchanged. Sub-second intraday execution ever needed →
+evolve the execution agent internally (SQS/event-driven); not a platform redesign.
+
+**Cost envelope:** existing t4g.small (~$14/mo) + ~$1-2/mo (S3/CloudWatch/SNS);
+Phase 5 adds ~$15-20/mo. NAT / Enterprise tier / PrivateLink / Kafka: never needed.
+
+**Implementation note:** Chunk 1-3 (fetch_request DDL, planner job, EC2 agent,
+ingestion job) build the first instance of this pattern. Build the manifest schema
+with a generic `task_type` field and the agent as dispatcher + handlers so
+publisher/enrichment/execution agents slot in later without rework.
 
 ### IBKR EC2 Proxy — Full Reference (built 2026-07-02)
 
