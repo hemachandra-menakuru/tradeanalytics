@@ -8,9 +8,8 @@
 
 # COMMAND ----------
 # MAGIC %pip install --quiet pyyaml python-dotenv
-
-# COMMAND ----------
-# MAGIC %restart_python
+# No %restart_python needed: yaml/dotenv are first imported AFTER this install.
+# (A restart is only required for packages already imported earlier in the session.)
 
 # COMMAND ----------
 import os, sys, logging
