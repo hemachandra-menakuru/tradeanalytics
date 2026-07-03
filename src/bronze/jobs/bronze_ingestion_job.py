@@ -208,14 +208,31 @@ class BronzeIngestionJob:
         Walk the priority list from config.sources.priority, health-check each,
         and return the first one that responds. Works for any number of providers —
         adding a new source = add it to sources.yml priority list, implement ABC.
+
+        Production guard: if config.sources.production_providers is set, a resolved
+        provider outside that list causes a hard failure instead of a silent
+        fallback — prevents e.g. yahoo data landing in production Bronze.
         """
+        allowed = config.get("sources.production_providers", default=None)
+
         chain = MarketDataFactory.get_provider_chain(config)
         for provider in chain:
             try:
                 if provider.health_check():
+                    if allowed is not None and provider.provider_name not in list(allowed):
+                        raise RuntimeError(
+                            f"PRODUCTION GUARD: provider '{provider.provider_name}' is healthy "
+                            f"but not in sources.production_providers {list(allowed)}. "
+                            f"All production-approved providers upstream of it are unreachable. "
+                            f"Refusing to ingest from a non-production source — fix connectivity "
+                            f"to an approved provider, or (tests only) remove/extend "
+                            f"production_providers in config."
+                        )
                     logger.info(f"Provider resolved: {provider.provider_name}")
                     return provider
                 logger.warning(f"Provider '{provider.provider_name}' health check failed — trying next")
+            except RuntimeError:
+                raise
             except Exception as e:
                 logger.warning(f"Provider '{provider.provider_name}' health check raised: {e} — trying next")
 

@@ -7,17 +7,26 @@ sources:
   fallback: yahoo         # kept for backward compat — last resort
   priority:               # tried in order until one passes health_check()
     - ibkr                # Client Portal REST — local Mac only (localhost:5055)
-    - ibinsync            # IB Gateway socket — EC2 proxy (54.197.158.82:4002)
+    - ibinsync            # IB Gateway socket — EC2 proxy (54.197.158.82:4004)
     - polygon             # cloud-friendly historical — add POLYGON_API_KEY to use
     - yahoo               # last resort — unofficial, no API key required
 
+  # Providers allowed to write production Bronze data. If the resolved provider
+  # is NOT in this list, BronzeIngestionJob fails loudly instead of silently
+  # ingesting from a non-production source (e.g. yahoo). Locked rule:
+  # "Yahoo Finance = unit test fallback only, never production."
+  production_providers:
+    - ibkr
+    - ibinsync
+
   ibkr:
-    gateway_mode: ec2         # local | ec2  — change this one line to switch gateway
+    gateway_mode: local       # local | ec2 — REST gateway runs on the Mac only;
+                              # the EC2 box runs the SOCKET gateway (use ibinsync for that)
     gateways:
       local:
         base_url: https://localhost:5055/v1/api
-      ec2:
-        base_url: http://54.197.158.82:4002/v1/api
+      # No ec2 entry: the EC2 box runs the IB Gateway SOCKET API (port 4004),
+      # not Client Portal REST. Cloud path = ibinsync provider below.
     verify_ssl: false
     timeout_seconds: 30
     max_retries: 3

@@ -45,26 +45,26 @@ resources:
               as_of_date: ""             # empty = today
               start_date: "2026-06-16"  # smoke test: Mon only (2 days max)
               end_date:   "2026-06-17"  # smoke test: Mon-Tue = 2 records
-          job_cluster_key: bronze_job_cluster
+              environment:       "${var.env}"
+              pipeline_version:  "${var.pipeline_version}"
+          environment_key: serverless_env
           timeout_seconds: 3600
           retry_on_timeout: false
           max_retries: 0                  # no retries during smoke test
 
-      job_clusters:
-        - job_cluster_key: bronze_job_cluster
-          new_cluster:
-            spark_version: "15.4.x-scala2.12"
-            node_type_id: "m5.xlarge"
-            num_workers: 1
-            policy_id: "001DC683697F1238"
-            aws_attributes:
-              availability: SPOT_WITH_FALLBACK
-              first_on_demand: 1
-            spark_conf:
-              spark.databricks.delta.preview.enabled: "true"
-            spark_env_vars:
-              ENVIRONMENT: "${var.env}"
-              PIPELINE_VERSION: "${var.pipeline_version}"
+      # Serverless-only decision (2026-06-30): no classic job clusters.
+      # Dependencies must mirror requirements-serverless.txt (source of truth).
+      # Note: serverless has no spark_env_vars — ENVIRONMENT and PIPELINE_VERSION
+      # are passed as notebook base_parameters instead (see task above).
+      environments:
+        - environment_key: serverless_env
+          spec:
+            client: "2"
+            dependencies:
+              - pyyaml
+              - python-dotenv
+              - ib_insync
+              - yfinance
       tags:
         project:    tradeanalytics
         layer:      bronze
@@ -95,26 +95,20 @@ resources:
               etf_only:     "false"
               skip_ibkr:    "true"    # always true in cloud — IBKR gateway on localhost only
               openfigi_key: ""
-          job_cluster_key: reference_job_cluster
+          environment_key: serverless_env
           timeout_seconds: 7200     # 2 hours — OpenFIGI enrichment for 10k instruments
           retry_on_timeout: false
           max_retries: 1
 
-      job_clusters:
-        - job_cluster_key: reference_job_cluster
-          new_cluster:
-            spark_version: "15.4.x-scala2.12"
-            node_type_id: "m5.xlarge"
-            num_workers: 1
-            policy_id: "001DC683697F1238"
-            aws_attributes:
-              availability: SPOT_WITH_FALLBACK
-              first_on_demand: 1
-            spark_conf:
-              spark.databricks.delta.preview.enabled: "true"
-            spark_env_vars:
-              ENVIRONMENT: "${var.env}"
-              PIPELINE_VERSION: "${var.pipeline_version}"
+      # Serverless-only decision (2026-06-30): no classic job clusters.
+      environments:
+        - environment_key: serverless_env
+          spec:
+            client: "2"
+            dependencies:
+              - pyyaml
+              - python-dotenv
+              - yfinance
       tags:
         project:    tradeanalytics
         layer:      reference

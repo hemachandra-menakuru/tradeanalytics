@@ -923,6 +923,14 @@ IBKR are both unreachable. Always use the regular cluster for notebook-based ing
 - Priority chain: `ibkr (REST) → ibinsync (socket) → polygon → yahoo`
 - Verified: fetched real SPY OHLCV data 2026-06-16→17 ✅
 
+**Where the verification notebook runs:**
+`notebooks/ops/ibkr_gateway_verify.py` must run **locally on the Mac** (terminal or
+IDE — it uses no Spark). It can NEVER run on Databricks serverless or clusters:
+their egress IPs are not whitelisted on the EC2 security group (port 4004 is locked
+to the owner's Mac IP). A Step-0 guard cell fails fast if run on Databricks.
+Run: `python -c "exec(open('notebooks/ops/ibkr_gateway_verify.py').read())"` from repo root
+(tradeanalytics conda env). Same rule applies to ANY notebook touching IBKR.
+
 **VNC access (visual debugging):**
 - Mac Finder → Go → Connect to Server (⌘K) → `vnc://54.197.158.82:5900`
 - Green dashboard = connected; shows API Server, Market Data Farm, Historical Data Farm

@@ -13,6 +13,28 @@
 # MAGIC 5. Summary — pass/fail for each check
 
 # COMMAND ----------
+# MAGIC %md ## Step 0 — Environment guard (must run locally)
+
+# COMMAND ----------
+
+import os
+
+# This notebook connects to the IBKR EC2 gateway (54.197.158.82:4004), whose
+# security group only allows the owner's Mac IP. Databricks serverless/clusters
+# egress from different IPs and will always be refused — fail fast with a clear
+# message instead of a confusing ModuleNotFoundError or connection timeout.
+if "DATABRICKS_RUNTIME_VERSION" in os.environ:
+    raise RuntimeError(
+        "STOP: this notebook must run LOCALLY on the Mac, not on Databricks.\n"
+        "Serverless/cluster IPs are not whitelisted on the EC2 gateway security group.\n"
+        "Run from terminal:\n"
+        "  cd ~/pr/tradeanalytics && python -c \"exec(open('notebooks/ops/ibkr_gateway_verify.py').read())\"\n"
+        "(use the tradeanalytics conda env python)"
+    )
+
+print("✅ Running locally — OK to proceed")
+
+# COMMAND ----------
 # MAGIC %md ## Step 1 — Configuration in use
 
 # COMMAND ----------
