@@ -25,10 +25,10 @@ resources:
       name: "[${var.env}] Fetch Planner (Two-Plane)"
       description: "Derives per-instrument fetch plans and emits control.fetch_request rows + S3 manifests for the EC2 bridge agent. CLAUDE.md §14."
 
-      schedule:
-        quartz_cron_expression: "0 0 19 * * MON-FRI"
-        timezone_id: "America/New_York"
-        pause_status: PAUSED          # unpause after first supervised end-to-end run
+      # No schedule yet — manual runs only until the full three-chunk pipeline
+      # (planner → EC2 agent → ingestion) is proven end-to-end. Then re-add:
+      #   quartz_cron_expression: "0 0 19 ? * MON-FRI"  (7pm ET Mon-Fri)
+      #   timezone_id: "America/New_York"
 
       email_notifications:
         on_failure:
