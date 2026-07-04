@@ -325,7 +325,33 @@ def _fail_manifest(key: str, manifest: dict, reason: str) -> None:
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
+def _acquire_singleton_lock():
+    """
+    One agent per vendor queue — enforced in-process, not just operationally.
+    An OS-level exclusive lock on a well-known file: a second launch exits
+    immediately instead of silently racing the first (4 orphaned agents raced
+    the queue on 2026-07-04 — this makes that impossible).
+    The lock dies with the process, so crashes never leave a stale lock.
+    """
+    import fcntl
+    lock_path = f"/tmp/fetch_agent_{VENDOR}.lock"
+    fh = open(lock_path, "w")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        log.error(
+            f"Another fetch_agent for vendor '{VENDOR}' is already running "
+            f"(lock held on {lock_path}). Exiting — one consumer per queue. "
+            f"Find it with: pgrep -af fetch_agent.py"
+        )
+        sys.exit(1)
+    fh.write(str(os.getpid()))
+    fh.flush()
+    return fh  # keep the handle alive for the process lifetime
+
+
 def run() -> None:
+    _lock = _acquire_singleton_lock()
     signal.signal(signal.SIGTERM, _handle_sigterm)
     signal.signal(signal.SIGINT, _handle_sigterm)
     gw = GatewayClient()
