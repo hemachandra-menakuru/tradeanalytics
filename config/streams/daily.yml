@@ -30,7 +30,10 @@ daily:
 
   # Ingestion operational settings
   ingestion:
-    batch_size_days: 30
+    batch_size_days: 30           # chunk size for INCREMENTAL / GAP_FILL
+    backfill_chunk_days: 365      # chunk size for INITIAL_LOAD / HISTORY_EXTENSION —
+                                  # IBKR pacing is per REQUEST, not per bar; 1y of
+                                  # daily bars costs the same as 1 month (12x fewer requests)
     max_gap_days: 30              # gaps > 30 days treated as backfill
 
     # ── Operational modes ────────────────────────────────────────────────────

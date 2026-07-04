@@ -81,6 +81,7 @@ class FetchRequestRepository:
             StructField("instrument_id", LongType(),   False),
             StructField("symbol",        StringType(), False),
             StructField("vendor",        StringType(), False),
+            StructField("vendor_instrument_id", StringType(), True),
             StructField("stream",        StringType(), False),
             StructField("bar_interval",  StringType(), False),
             StructField("start_date",    DateType(),   False),
@@ -92,8 +93,9 @@ class FetchRequestRepository:
         rows = [
             (
                 r.request_key, r.batch_id, r.instrument_id, r.symbol,
-                r.vendor, r.stream, r.bar_interval, r.start_date, r.end_date,
-                r.load_type, r.task_type, self._manifest_path(r),
+                r.vendor, r.vendor_instrument_id, r.stream, r.bar_interval,
+                r.start_date, r.end_date, r.load_type, r.task_type,
+                self._manifest_path(r),
             )
             for r in requests
         ]
@@ -101,12 +103,12 @@ class FetchRequestRepository:
         df.createOrReplaceTempView("_new_fetch_requests")
         self._spark.sql(f"""
             INSERT INTO {self._table}
-                (request_key, batch_id, instrument_id, symbol, vendor, stream,
-                 bar_interval, start_date, end_date, load_type, task_type,
-                 s3_manifest_path)
-            SELECT request_key, batch_id, instrument_id, symbol, vendor, stream,
-                   bar_interval, start_date, end_date, load_type, task_type,
-                   s3_manifest_path
+                (request_key, batch_id, instrument_id, symbol, vendor,
+                 vendor_instrument_id, stream, bar_interval, start_date,
+                 end_date, load_type, task_type, s3_manifest_path)
+            SELECT request_key, batch_id, instrument_id, symbol, vendor,
+                   vendor_instrument_id, stream, bar_interval, start_date,
+                   end_date, load_type, task_type, s3_manifest_path
             FROM _new_fetch_requests
         """)
 

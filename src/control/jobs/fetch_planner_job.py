@@ -52,7 +52,15 @@ class FetchPlannerJob:
         self._universe   = DeltaUniverseReader(mode="spark", spark=spark, catalog=catalog)
         self._watermarks = DeltaWatermarkStore(mode="spark", spark=spark, catalog=catalog)
         self._planner    = IngestionPlanner(config, stream_name)
-        self._builder    = FetchRequestBuilder(raw_bucket=raw_bucket)
+
+        import os
+        ingestion_cfg = self._stream_cfg.ingestion
+        self._builder = FetchRequestBuilder(
+            raw_bucket=raw_bucket,
+            backfill_chunk_days=int(getattr(ingestion_cfg, "backfill_chunk_days", 365)),
+            requested_by="fetch_planner_job",
+            pipeline_version=os.environ.get("PIPELINE_VERSION", "unknown"),
+        )
         self._repo       = FetchRequestRepository(
             spark=spark, catalog=catalog, raw_bucket=raw_bucket, fs_put=fs_put,
         )
@@ -70,6 +78,7 @@ class FetchPlannerJob:
 
         instruments = self._universe.get_active_instruments(symbols=symbols or None)
         in_flight   = self._in_flight_instrument_ids()
+        enrichment  = self._load_instrument_enrichment()
 
         emitted, skipped_noop, skipped_inflight = [], [], []
 
@@ -90,17 +99,31 @@ class FetchPlannerJob:
                 skipped_noop.append(inst.symbol)
                 continue
 
+            enr = enrichment.get(inst.instrument_id, {})
+            if not enr.get("vendor_instrument_id"):
+                logger.warning(
+                    f"[{inst.symbol}] no {self._vendor} vendor_instrument_id in "
+                    f"reference.instrument_vendor_id — agent will fall back to "
+                    f"symbol qualification"
+                )
             requests = self._builder.build(
                 batch_id=batch_id,
-                instrument_id=inst.instrument_id,
-                symbol=inst.symbol,
-                vendor=self._vendor,
                 stream=self._stream_name,
+                load_type=plan.mode.value.upper(),
                 bar_interval=interval,
                 start_date=plan.start_date,
                 end_date=plan.end_date,
-                load_type=plan.mode.value.upper(),
                 batch_size_days=plan.batch_size_days,
+                instrument_id=inst.instrument_id,
+                symbol=inst.symbol,
+                vendor=self._vendor,
+                vendor_instrument_id=enr.get("vendor_instrument_id"),
+                asset_class=enr.get("asset_class") or "equity",
+                security_type="STK",   # equities/ETFs only until new asset classes onboard
+                exchange="SMART",
+                exchange_mic=enr.get("exchange_mic"),
+                currency=enr.get("currency") or "USD",
+                vendor_exchange=enr.get("vendor_exchange"),
             )
             logger.info(
                 f"[{inst.symbol}] {plan.mode.value}: {plan.start_date} → {plan.end_date} "
@@ -123,6 +146,28 @@ class FetchPlannerJob:
         }
         logger.info(f"FetchPlannerJob complete: {summary}")
         return summary
+
+    def _load_instrument_enrichment(self) -> dict:
+        """
+        One JOIN across the reference tables → everything the manifest needs
+        (Contract v2 principle: planner resolves once, agent looks up nothing).
+        Keyed by instrument_id.
+        """
+        rows = self._spark.sql(f"""
+            SELECT i.instrument_id,
+                   i.asset_class,
+                   l.exchange_mic,
+                   l.currency,
+                   v.vendor_instrument_id,
+                   v.vendor_exchange
+            FROM {self._catalog}.reference.instrument i
+            LEFT JOIN {self._catalog}.reference.instrument_listing l
+                   ON l.instrument_id = i.instrument_id AND l.is_current = true
+            LEFT JOIN {self._catalog}.reference.instrument_vendor_id v
+                   ON v.instrument_id = i.instrument_id
+                  AND v.vendor = '{self._vendor}' AND v.is_current = true
+        """).collect()
+        return {r.instrument_id: r.asDict() for r in rows}
 
     def _in_flight_instrument_ids(self) -> set:
         """Instruments with unfinished requests — never double-queue them.

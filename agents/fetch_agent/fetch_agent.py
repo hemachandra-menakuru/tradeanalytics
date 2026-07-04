@@ -4,27 +4,27 @@ TradeAnalytics Fetch Agent — Connectivity & Execution Plane (EC2)
 ==================================================================
 Two-Plane Architecture (CLAUDE.md §14). This agent is a STATELESS COURIER:
 
-  1. Poll s3://<raw>/control/fetch/pending/ for manifests (the planner's inbox)
-  2. Fetch OHLCV from IB Gateway on localhost (same box) per the manifest
+  1. Poll s3://<raw>/control/fetch/<vendor>/pending/ for Contract-v2 manifests
+  2. Fetch OHLCV from IB Gateway on localhost per the manifest (zero lookups —
+     the planner resolved instrument identity and fetch parameters already)
   3. Land the RAW payload to the manifest's land_to S3 prefix
   4. Move the manifest (enriched with results) to done/ — or failed/ on error
 
-It holds NO business logic: no validation, no schemas, no watermarks, no
-decisions. Everything it needs arrives inside each manifest. Delta bookkeeping
-is reconciled by the Databricks ingestion job from the done/failed manifests.
+Contract v2 (2026-07-05): manifests are fully self-contained and versioned.
+The agent builds the IBKR contract DIRECTLY from vendor_instrument_id (conId)
+— no symbol qualification round-trips. Qualification by symbol remains only
+as a logged fallback for unmapped instruments. Manifests with an unknown
+contract_version are hard-failed to failed/, never guessed at.
 
-Vendor scoping: this file implements the generic queue pattern with an
-IBKR-specific GatewayClient. It serves ONE vendor queue (TA_VENDOR, pinned to
-'ibkr' by fetch-agent-ibkr.service). A future Polygon agent gets its own
-script/client — do not multiplex vendors inside this file.
+Loop behaviour: drains continuously while work exists (no sleep between
+paginated batches); sleeps POLL_SECONDS only when idle; hourly heartbeat
+log line proves liveness in journald.
 
-Deployment: single file on the EC2 box, venv with ib_insync + boto3 only.
-S3 access via IAM instance profile — no credentials on disk.
-Deployed from repo path agents/fetch_agent/ via scp (no repo clone on the box).
+Vendor scoping: one script instance serves ONE vendor queue (TA_VENDOR,
+pinned by fetch-agent-ibkr.service). A future vendor gets its own script.
 
-Idempotency: fetch → land → move-manifest, in that order. A crash mid-cycle
-re-processes the manifest on restart; deterministic filenames make the re-land
-an overwrite, and Bronze's dedup makes replays harmless (at-least-once + idempotent).
+Idempotency: fetch → land → move-manifest, in that order. At-least-once +
+deterministic filenames + Bronze dedup = replays are harmless.
 """
 
 from __future__ import annotations
@@ -40,9 +40,11 @@ from datetime import date, datetime, timezone
 
 import boto3
 
-# ── Configuration (env overrides; sane defaults for the current box) ─────────
+SUPPORTED_CONTRACT_VERSIONS = {"2"}
+
+# ── Configuration (env overrides; defaults match current paper setup) ────────
 RAW_BUCKET     = os.environ.get("TA_RAW_BUCKET", "handh-trade-raw-use1")
-VENDOR         = os.environ.get("TA_VENDOR", "ibkr")   # this agent serves ONE vendor's queue
+VENDOR         = os.environ.get("TA_VENDOR", "ibkr")
 PENDING_PREFIX = f"control/fetch/{VENDOR}/pending/"
 DONE_PREFIX    = f"control/fetch/{VENDOR}/done/"
 FAILED_PREFIX  = f"control/fetch/{VENDOR}/failed/"
@@ -51,9 +53,10 @@ IB_HOST        = os.environ.get("TA_IB_HOST", "127.0.0.1")
 IB_PORT        = int(os.environ.get("TA_IB_PORT", "4004"))   # paper; 4001 live
 IB_CLIENT_ID   = int(os.environ.get("TA_IB_CLIENT_ID", "20"))
 
-POLL_SECONDS   = int(os.environ.get("TA_POLL_SECONDS", "60"))
-PACING_SECONDS = float(os.environ.get("TA_PACING_SECONDS", "2.0"))  # IBKR historical pacing
-MAX_ATTEMPTS   = int(os.environ.get("TA_MAX_ATTEMPTS", "3"))
+POLL_SECONDS      = int(os.environ.get("TA_POLL_SECONDS", "60"))
+PACING_SECONDS    = float(os.environ.get("TA_PACING_SECONDS", "2.0"))
+MAX_ATTEMPTS      = int(os.environ.get("TA_MAX_ATTEMPTS", "3"))
+HEARTBEAT_SECONDS = int(os.environ.get("TA_HEARTBEAT_SECONDS", "3600"))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -104,27 +107,53 @@ class GatewayClient:
         except OSError:
             return False
 
-    def fetch_ohlcv(self, manifest: dict) -> list:
-        """Fetch bars per manifest; returns list of raw bar dicts."""
-        from ib_insync import Stock
+    def _build_contract(self, inst: dict):
+        """
+        Contract v2: build directly from planner-resolved identity — no
+        network lookups. Fallback: qualify by symbol (logged) when the
+        instrument has no vendor mapping yet.
+        """
+        from ib_insync import Contract, Stock
 
-        self._connect()
-        start = date.fromisoformat(manifest["start_date"])
-        end   = date.fromisoformat(manifest["end_date"])
+        con_id = inst.get("vendor_instrument_id")
+        if con_id:
+            return Contract(
+                conId=int(con_id),
+                secType=inst.get("security_type", "STK"),
+                exchange=inst.get("exchange", "SMART"),
+                currency=inst.get("currency", "USD"),
+            )
 
-        contract = Stock(manifest["symbol"], "SMART", "USD")
+        log.warning(
+            f"{inst.get('symbol')}: no vendor_instrument_id in manifest — "
+            f"falling back to symbol qualification (map it in "
+            f"reference.instrument_vendor_id to remove this round-trip)"
+        )
+        contract = Stock(inst["symbol"], inst.get("exchange", "SMART"),
+                         inst.get("currency", "USD"))
         self._ib.qualifyContracts(contract)
+        return contract
 
-        # IBKR-required explicit-timezone format (yyyymmdd-hh:mm:ss = UTC).
-        # The legacy space-separated form triggers deprecation warning 2174 and
-        # will be REJECTED in a future gateway API release.
+    def fetch_ohlcv(self, manifest: dict) -> list:
+        """Fetch bars per Contract-v2 manifest; returns list of raw bar dicts."""
+        self._connect()
+
+        inst  = manifest["instrument"]
+        fetch = manifest["fetch"]
+        start = date.fromisoformat(fetch["start_date"])
+        end   = date.fromisoformat(fetch["end_date"])
+
+        contract = self._build_contract(inst)
+
+        # Explicit-UTC endDateTime (yyyymmdd-hh:mm:ss) — the legacy
+        # space-separated form triggers IBKR deprecation warning 2174.
         bars = self._ib.reqHistoricalData(
             contract,
             endDateTime=end.strftime("%Y%m%d-23:59:59"),
             durationStr=_duration_str(start, end),
-            barSizeSetting=_BAR_SIZE[manifest["bar_interval"]],
-            whatToShow="TRADES",
-            useRTH=True,
+            barSizeSetting=_BAR_SIZE[fetch["bar_interval"]],
+            whatToShow=fetch.get("what_to_show", "TRADES"),
+            useRTH=bool(fetch.get("use_rth", True)),
             formatDate=1,
             keepUpToDate=False,
         )
@@ -155,10 +184,9 @@ s3 = boto3.client("s3")
 
 
 def list_pending(limit: int = 200) -> list:
-    """Oldest-first manifest keys in the inbox."""
     resp = s3.list_objects_v2(Bucket=RAW_BUCKET, Prefix=PENDING_PREFIX, MaxKeys=limit)
     objs = resp.get("Contents", [])
-    objs.sort(key=lambda o: o["Key"])  # request_keys embed batch timestamp + seq
+    objs.sort(key=lambda o: o["Key"])
     return [o["Key"] for o in objs if o["Key"].endswith(".json")]
 
 
@@ -168,22 +196,22 @@ def read_manifest(key: str) -> dict:
 
 
 def land_raw(manifest: dict, bars: list) -> str:
-    """Write the raw payload to the manifest's land_to prefix. Returns s3 path."""
+    inst = manifest["instrument"]
     payload = {
-        "request_key":   manifest["request_key"],
-        "instrument_id": manifest["instrument_id"],
-        "symbol":        manifest["symbol"],
-        "vendor":        manifest["vendor"],
-        "stream":        manifest["stream"],
-        "bar_interval":  manifest["bar_interval"],
-        "load_type":     manifest["load_type"],
-        "batch_id":      manifest["batch_id"],
-        "fetched_at":    datetime.now(timezone.utc).isoformat(),
-        "fetched_by":    f"fetch_agent_{VENDOR}_v1",
-        "record_count":  len(bars),
-        "bars":          bars,
+        "payload_format": manifest["landing"].get("payload_format", "ohlcv_json_v1"),
+        "request_key":    manifest["request_key"],
+        "batch_id":       manifest["batch_id"],
+        "stream":         manifest["stream"],
+        "load_type":      manifest["load_type"],
+        "instrument":     inst,                     # full planner-resolved identity
+        "fetch":          manifest["fetch"],
+        "lineage":        manifest.get("lineage", {}),
+        "fetched_at":     datetime.now(timezone.utc).isoformat(),
+        "fetched_by":     f"fetch_agent_{VENDOR}_v2",
+        "record_count":   len(bars),
+        "bars":           bars,
     }
-    land_to = manifest["land_to"]  # s3://bucket/prefix/
+    land_to = manifest["landing"]["land_to"]
     assert land_to.startswith(f"s3://{RAW_BUCKET}/")
     key = land_to.replace(f"s3://{RAW_BUCKET}/", "") + f"{manifest['request_key']}.json"
     s3.put_object(Bucket=RAW_BUCKET, Key=key, Body=json.dumps(payload).encode())
@@ -191,13 +219,9 @@ def land_raw(manifest: dict, bars: list) -> str:
 
 
 def move_manifest(pending_key: str, manifest: dict, outcome_prefix: str) -> None:
-    """Write enriched manifest to done/ or failed/, then remove from pending/."""
     name = pending_key.split("/")[-1]
-    s3.put_object(
-        Bucket=RAW_BUCKET,
-        Key=outcome_prefix + name,
-        Body=json.dumps(manifest, indent=2).encode(),
-    )
+    s3.put_object(Bucket=RAW_BUCKET, Key=outcome_prefix + name,
+                  Body=json.dumps(manifest, indent=2).encode())
     s3.delete_object(Bucket=RAW_BUCKET, Key=pending_key)
 
 
@@ -212,10 +236,10 @@ def handle_fetch_ohlcv(gw: GatewayClient, pending_key: str, manifest: dict) -> N
             bars = gw.fetch_ohlcv(manifest)
             data_path = land_raw(manifest, bars)
             manifest.update({
-                "status":       "LANDED",
-                "record_count": len(bars),
-                "s3_data_path": data_path,
-                "landed_at":    datetime.now(timezone.utc).isoformat(),
+                "status":        "LANDED",
+                "record_count":  len(bars),
+                "s3_data_path":  data_path,
+                "landed_at":     datetime.now(timezone.utc).isoformat(),
                 "attempt_count": attempts,
             })
             move_manifest(pending_key, manifest, DONE_PREFIX)
@@ -238,9 +262,16 @@ def handle_fetch_ohlcv(gw: GatewayClient, pending_key: str, manifest: dict) -> N
 
 HANDLERS = {
     "FETCH_OHLCV": handle_fetch_ohlcv,
-    # Future task types (same dispatch pattern, per two-plane decision):
+    # Future fetch-domain task types slot in here (same dispatch pattern):
     # "FETCH_OPTIONS_CHAIN": handle_fetch_options_chain,
 }
+
+
+def _fail_manifest(key: str, manifest: dict, reason: str) -> None:
+    log.error(f"{key}: {reason} — moving to failed/")
+    manifest.update({"status": "FAILED", "error_message": reason,
+                     "failed_at": datetime.now(timezone.utc).isoformat()})
+    move_manifest(key, manifest, FAILED_PREFIX)
 
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
@@ -249,12 +280,16 @@ def run() -> None:
     signal.signal(signal.SIGTERM, _handle_sigterm)
     signal.signal(signal.SIGINT, _handle_sigterm)
     gw = GatewayClient()
+    total_processed = 0
+    last_heartbeat  = time.monotonic()
+
     log.info(
-        f"fetch_agent started — bucket={RAW_BUCKET}, gateway={IB_HOST}:{IB_PORT}, "
-        f"poll={POLL_SECONDS}s, pacing={PACING_SECONDS}s"
+        f"fetch_agent v2 started — vendor={VENDOR}, bucket={RAW_BUCKET}, "
+        f"gateway={IB_HOST}:{IB_PORT}, poll={POLL_SECONDS}s, pacing={PACING_SECONDS}s"
     )
 
     while not _shutdown:
+        processed_this_cycle = 0
         try:
             keys = list_pending()
             if keys and not gw.is_up():
@@ -265,26 +300,44 @@ def run() -> None:
                     if _shutdown:
                         break
                     manifest = read_manifest(key)
+
+                    version = manifest.get("contract_version")
+                    if version not in SUPPORTED_CONTRACT_VERSIONS:
+                        _fail_manifest(key, manifest,
+                                       f"unsupported contract_version '{version}' "
+                                       f"(agent supports {sorted(SUPPORTED_CONTRACT_VERSIONS)})")
+                        continue
+
                     handler = HANDLERS.get(manifest.get("task_type", ""))
                     if handler is None:
-                        log.error(f"{key}: unknown task_type '{manifest.get('task_type')}' — moving to failed/")
-                        manifest.update({"status": "FAILED",
-                                         "error_message": f"unknown task_type {manifest.get('task_type')}"})
-                        move_manifest(key, manifest, FAILED_PREFIX)
+                        _fail_manifest(key, manifest,
+                                       f"unknown task_type '{manifest.get('task_type')}'")
                         continue
+
                     handler(gw, key, manifest)
+                    processed_this_cycle += 1
+                    total_processed += 1
                     time.sleep(PACING_SECONDS)
         except Exception as e:
             log.error(f"poll cycle error: {type(e).__name__}: {e}")
 
-        # Sleep in 1s slices so SIGTERM is honoured promptly
-        for _ in range(POLL_SECONDS):
-            if _shutdown:
-                break
-            time.sleep(1)
+        # Continuous drain: if this cycle did work, re-poll immediately —
+        # more work is probably waiting (pagination). Sleep only when idle.
+        if processed_this_cycle == 0 and not _shutdown:
+            if time.monotonic() - last_heartbeat >= HEARTBEAT_SECONDS:
+                log.info(
+                    f"heartbeat — idle, queue empty, gateway "
+                    f"{'up' if gw.is_up() else 'DOWN'}, "
+                    f"{total_processed} request(s) processed since start"
+                )
+                last_heartbeat = time.monotonic()
+            for _ in range(POLL_SECONDS):
+                if _shutdown:
+                    break
+                time.sleep(1)
 
     gw.disconnect()
-    log.info("fetch_agent stopped cleanly")
+    log.info(f"fetch_agent stopped cleanly — {total_processed} request(s) processed this run")
 
 
 if __name__ == "__main__":
