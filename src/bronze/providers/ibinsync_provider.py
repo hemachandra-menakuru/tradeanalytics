@@ -171,7 +171,10 @@ class IBInsyncProvider(HistoricalDataProvider):
 
         bar_size   = _INTERVAL_TO_BAR_SIZE[interval]
         duration   = _date_range_to_duration(start_date, end_date)
-        end_dt_str = end_date.strftime("%Y%m%d 23:59:59")
+        # Explicit-UTC format (yyyymmdd-hh:mm:ss) — legacy space-separated form
+        # triggers IBKR deprecation warning 2174 and will be rejected in a
+        # future gateway API release.
+        end_dt_str = end_date.strftime("%Y%m%d-23:59:59")
 
         # Resolve symbol to a qualified IBKR Contract
         contract = Stock(symbol, "SMART", "USD")

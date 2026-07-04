@@ -115,9 +115,12 @@ class GatewayClient:
         contract = Stock(manifest["symbol"], "SMART", "USD")
         self._ib.qualifyContracts(contract)
 
+        # IBKR-required explicit-timezone format (yyyymmdd-hh:mm:ss = UTC).
+        # The legacy space-separated form triggers deprecation warning 2174 and
+        # will be REJECTED in a future gateway API release.
         bars = self._ib.reqHistoricalData(
             contract,
-            endDateTime=end.strftime("%Y%m%d 23:59:59"),
+            endDateTime=end.strftime("%Y%m%d-23:59:59"),
             durationStr=_duration_str(start, end),
             barSizeSetting=_BAR_SIZE[manifest["bar_interval"]],
             whatToShow="TRADES",

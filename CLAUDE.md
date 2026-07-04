@@ -1033,6 +1033,13 @@ to the owner's Mac IP). A Step-0 guard cell fails fast if run on Databricks.
 Run: `python -c "exec(open('notebooks/ops/ibkr_gateway_verify.py').read())"` from repo root
 (tradeanalytics conda env). Same rule applies to ANY notebook touching IBKR.
 
+**IB Gateway clientId registry (allocate new IDs here — collisions break connections):**
+| clientId | Process |
+|---|---|
+| 10 | IBInsyncProvider (Mac, dev/backtest path) |
+| 20 | fetch_agent (EC2, ibkr vendor queue) |
+| 99 | connectivity_test / ad-hoc diagnostics |
+
 **VNC access (visual debugging):**
 - Mac Finder → Go → Connect to Server (⌘K) → `vnc://54.197.158.82:5900`
 - Green dashboard = connected; shows API Server, Market Data Farm, Historical Data Farm
