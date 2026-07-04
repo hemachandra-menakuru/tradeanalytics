@@ -260,8 +260,57 @@ def handle_fetch_ohlcv(gw: GatewayClient, pending_key: str, manifest: dict) -> N
     log.error(f"{manifest['request_key']}: FAILED after {attempts} attempts — {last_err}")
 
 
+def handle_qualify_instruments(gw: GatewayClient, pending_key: str, manifest: dict) -> None:
+    """
+    Batch symbol→conId qualification for the vendor-ID seeding flow
+    (notebooks/reference/06_seed_vendor_ids.py). The notebook submits one
+    manifest with N instruments; we qualify each via the gateway and write
+    the results manifest to done/. Databricks loads them into Delta — the
+    agent never touches the reference tables.
+    """
+    from ib_insync import Stock
+
+    gw._connect()
+    mappings, failures = [], []
+    for inst in manifest.get("instruments", []):
+        symbol   = inst["symbol"]
+        ibkr_sym = symbol.replace(".", " ")   # IBKR dot-class symbology (BRK.B -> BRK B)
+        try:
+            contract = Stock(ibkr_sym, "SMART", inst.get("currency") or "USD")
+            gw._ib.qualifyContracts(contract)
+            if not contract.conId:
+                raise ValueError("qualification returned no conId")
+            mappings.append({
+                "instrument_id":        inst["instrument_id"],
+                "symbol":               symbol,
+                "vendor":               VENDOR,
+                "vendor_instrument_id": str(contract.conId),
+                "vendor_exchange":      contract.primaryExchange or None,
+                "vendor_symbol":        contract.localSymbol or ibkr_sym,
+                "currency":             contract.currency,
+            })
+            log.info(f"qualified {symbol} → conId {contract.conId} @ {contract.primaryExchange}")
+        except Exception as e:
+            failures.append({"symbol": symbol, "error": f"{type(e).__name__}: {e}"})
+            log.warning(f"qualify {symbol} FAILED: {e}")
+        time.sleep(PACING_SECONDS / 2)   # qualification is lighter than history requests
+
+    manifest.update({
+        "status":        "LANDED",
+        "mappings":      mappings,
+        "failures":      failures,
+        "mapping_count": len(mappings),
+        "landed_at":     datetime.now(timezone.utc).isoformat(),
+        "fetched_by":    f"fetch_agent_{VENDOR}_v2",
+    })
+    move_manifest(pending_key, manifest, DONE_PREFIX)
+    log.info(f"{manifest['request_key']}: QUALIFY complete — "
+             f"{len(mappings)} mapped, {len(failures)} failed")
+
+
 HANDLERS = {
-    "FETCH_OHLCV": handle_fetch_ohlcv,
+    "FETCH_OHLCV":         handle_fetch_ohlcv,
+    "QUALIFY_INSTRUMENTS": handle_qualify_instruments,
     # Future fetch-domain task types slot in here (same dispatch pattern):
     # "FETCH_OPTIONS_CHAIN": handle_fetch_options_chain,
 }
