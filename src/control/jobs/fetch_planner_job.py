@@ -38,12 +38,23 @@ class FetchPlannerJob:
         fs_put,
         stream_name: str = "daily",
         vendor: str = "ibkr",
+        require_vendor_id: bool = True,
     ):
+        """
+        require_vendor_id (default True — PRODUCTION POLICY): instruments with
+        no current mapping in reference.instrument_vendor_id are SKIPPED
+        (reported in summary.skipped_unmapped), never emitted as symbol-only
+        manifests. Rationale: symbol qualification at fetch time can silently
+        bind a REUSED ticker to the wrong company (wrong data under our
+        instrument_id — the exact failure instrument_id exists to prevent).
+        Set False only for supervised bootstrap runs.
+        """
         self._config      = config
         self._spark       = spark
         self._stream_name = stream_name
         self._stream_cfg  = getattr(config, stream_name)
         self._vendor      = vendor
+        self._require_vendor_id = require_vendor_id
 
         catalog          = config.databricks.catalog
         raw_bucket       = config.aws.s3.raw
@@ -80,7 +91,7 @@ class FetchPlannerJob:
         in_flight   = self._in_flight_instrument_ids()
         enrichment  = self._load_instrument_enrichment()
 
-        emitted, skipped_noop, skipped_inflight = [], [], []
+        emitted, skipped_noop, skipped_inflight, skipped_unmapped = [], [], [], []
 
         for inst in instruments:
             if inst.instrument_id in in_flight:
@@ -101,10 +112,17 @@ class FetchPlannerJob:
 
             enr = enrichment.get(inst.instrument_id, {})
             if not enr.get("vendor_instrument_id"):
+                if self._require_vendor_id:
+                    logger.warning(
+                        f"[{inst.symbol}] SKIPPED — no current {self._vendor} mapping in "
+                        f"reference.instrument_vendor_id (require_vendor_id policy). "
+                        f"Seed the mapping (scripts/seed_vendor_ids.py) to enable fetching."
+                    )
+                    skipped_unmapped.append(inst.symbol)
+                    continue
                 logger.warning(
-                    f"[{inst.symbol}] no {self._vendor} vendor_instrument_id in "
-                    f"reference.instrument_vendor_id — agent will fall back to "
-                    f"symbol qualification"
+                    f"[{inst.symbol}] BOOTSTRAP MODE — no {self._vendor} mapping; agent "
+                    f"will fall back to symbol qualification (reuse risk accepted)"
                 )
             requests = self._builder.build(
                 batch_id=batch_id,
@@ -142,6 +160,7 @@ class FetchPlannerJob:
             "requests_emitted":  len(emitted),
             "skipped_noop":      skipped_noop,
             "skipped_inflight":  skipped_inflight,
+            "skipped_unmapped":  skipped_unmapped,   # unmapped = blocked by policy, needs seeding
             "dry_run":           dry_run,
         }
         logger.info(f"FetchPlannerJob complete: {summary}")
