@@ -29,16 +29,19 @@ if IS_DATABRICKS:
     dbutils.widgets.text("symbols",     "",      "Symbols (blank = all active)")
     dbutils.widgets.text("dry_run",     "false", "Dry run (true/false)")
     dbutils.widgets.text("as_of_date",  "",      "As-of date (YYYY-MM-DD, blank = today)")
+    dbutils.widgets.text("vendor",      "ibkr",  "Vendor queue (ibkr | polygon)")
     dbutils.widgets.text("environment", "dev",   "Deployment environment")
 
     symbols_param    = dbutils.widgets.get("symbols").strip()
     dry_run          = dbutils.widgets.get("dry_run").strip().lower() == "true"
     as_of_date_param = dbutils.widgets.get("as_of_date").strip()
+    vendor           = dbutils.widgets.get("vendor").strip() or "ibkr"
     os.environ.setdefault("ENVIRONMENT", dbutils.widgets.get("environment").strip() or "dev")
 else:
     symbols_param    = os.environ.get("PLANNER_SYMBOLS", "")
     dry_run          = os.environ.get("PLANNER_DRY_RUN", "false").lower() == "true"
     as_of_date_param = os.environ.get("PLANNER_AS_OF_DATE", "")
+    vendor           = os.environ.get("PLANNER_VENDOR", "ibkr")
 
 symbols    = [s.strip() for s in symbols_param.split(",") if s.strip()] or None
 as_of_date = date.fromisoformat(as_of_date_param) if as_of_date_param else None
@@ -67,7 +70,10 @@ else:
 # COMMAND ----------
 from src.control.jobs.fetch_planner_job import FetchPlannerJob
 
-job = FetchPlannerJob(config=config, spark=spark, fs_put=_fs_put, stream_name="daily", vendor="ibkr")
+# TODO(Phase 3+): vendor should come per-instrument from
+# reference.ticker_feed_config.preferred_vendor (column exists since Phase 3A),
+# not a job-level parameter. Job-level is correct while IBKR is the only vendor.
+job = FetchPlannerJob(config=config, spark=spark, fs_put=_fs_put, stream_name="daily", vendor=vendor)
 summary = job.run(symbols=symbols, as_of_date=as_of_date, dry_run=dry_run)
 
 print("=" * 60)

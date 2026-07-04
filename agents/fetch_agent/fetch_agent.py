@@ -13,6 +13,11 @@ It holds NO business logic: no validation, no schemas, no watermarks, no
 decisions. Everything it needs arrives inside each manifest. Delta bookkeeping
 is reconciled by the Databricks ingestion job from the done/failed manifests.
 
+Vendor scoping: this file implements the generic queue pattern with an
+IBKR-specific GatewayClient. It serves ONE vendor queue (TA_VENDOR, pinned to
+'ibkr' by fetch-agent-ibkr.service). A future Polygon agent gets its own
+script/client — do not multiplex vendors inside this file.
+
 Deployment: single file on the EC2 box, venv with ib_insync + boto3 only.
 S3 access via IAM instance profile — no credentials on disk.
 Deployed from repo path agents/fetch_agent/ via scp (no repo clone on the box).
@@ -171,7 +176,7 @@ def land_raw(manifest: dict, bars: list) -> str:
         "load_type":     manifest["load_type"],
         "batch_id":      manifest["batch_id"],
         "fetched_at":    datetime.now(timezone.utc).isoformat(),
-        "fetched_by":    "fetch_agent_v1",
+        "fetched_by":    f"fetch_agent_{VENDOR}_v1",
         "record_count":  len(bars),
         "bars":          bars,
     }

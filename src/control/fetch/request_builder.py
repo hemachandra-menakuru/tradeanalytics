@@ -57,7 +57,9 @@ class FetchRequestBuilder:
             seq += 1
             ingest_partition = f"ingest_date={date.today().isoformat()}"
             requests.append(FetchRequest(
-                request_key=f"{batch_id}_{symbol}_{seq:03d}",
+                # vendor in the key: same symbol via two vendors must never
+                # collide in request_keys or landed filenames
+                request_key=f"{batch_id}_{vendor}_{symbol}_{seq:03d}",
                 batch_id=batch_id,
                 instrument_id=instrument_id,
                 symbol=symbol,
