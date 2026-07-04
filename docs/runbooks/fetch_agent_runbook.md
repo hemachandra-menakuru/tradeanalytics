@@ -26,14 +26,43 @@ batches for the seeding flow). Unknown task types / contract versions → `faile
 
 ---
 
+## 1a. Access setup (one-time, on the Mac)
+
+Every command in this runbook runs **from your local Mac** over SSH. To keep the
+commands short, this runbook uses the alias `ibkrbox`. Set it up once:
+
+```bash
+# Add to ~/.zshrc (one time):
+echo "alias ibkrbox='ssh -i ~/.ssh/handh-trade-ibkr-proxy.pem ubuntu@54.197.158.82'" >> ~/.zshrc
+source ~/.zshrc
+
+# Test:
+ibkrbox "hostname && uptime"
+```
+
+After that, `ibkrbox "<command>"` = run `<command>` on the EC2 box. If you're on
+a machine without the alias, expand it manually — this:
+
+```bash
+ibkrbox "systemctl status fetch-agent-ibkr --no-pager"
+```
+is exactly:
+```bash
+ssh -i ~/.ssh/handh-trade-ibkr-proxy.pem ubuntu@54.197.158.82 "systemctl status fetch-agent-ibkr --no-pager"
+```
+
+The `aws s3 …` and `databricks …` commands run directly on the Mac (no SSH) —
+they use your local AWS/Databricks profiles.
+
+---
+
 ## 2. Standard operations (systemd — the normal mode)
 
 > Until systemd is installed, see §3 for foreground mode. After installation,
 > NEVER run the agent by hand — use these only.
 
 ```bash
-# All from the Mac. Alias the SSH for convenience:
-#   alias ibkrbox='ssh -i ~/.ssh/handh-trade-ibkr-proxy.pem ubuntu@54.197.158.82'
+# All from the Mac, via the ibkrbox alias (§1a).
 
 # Status + last 20 log lines
 ibkrbox "systemctl status fetch-agent-ibkr --no-pager && journalctl -u fetch-agent-ibkr -n 20 --no-pager"
