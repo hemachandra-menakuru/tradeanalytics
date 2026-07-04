@@ -129,10 +129,14 @@ LANDED/INGESTED/FAILED · receipts archived to `done/archive/<date>/`.
   (none) ────────────► PENDING ────────────► [receipt in done/] ─► LANDED ─► INGESTED
                           │                                             (terminal ✓)
                           │ agent exhausts retries / bad contract
-                          └────────────► [manifest in failed/] ──► FAILED
-                                                                  (terminal ✗ — next
-                                                                   planner run re-plans
-                                                                   uncovered dates)
+                          ├────────────► [manifest in failed/] ──► FAILED
+                          │                                       (terminal ✗ — next
+                          │                                        planner run re-plans
+                          │                                        uncovered dates)
+                          │ planner crashed before manifest write
+                          └─[repair at next planner start]────► ORPHANED
+                                                                (terminal ✗ — instrument
+                                                                 re-planned immediately)
 ```
 S3 mirror: `pending/` = PENDING · `done/` = LANDED (awaiting reconcile) ·
 `failed/` = FAILED · `done/archive/` = INGESTED.
@@ -142,7 +146,7 @@ S3 mirror: `pending/` = PENDING · `done/` = LANDED (awaiting reconcile) ·
 | Stage | Failure | Detection | Handling / Recovery | Manual action? |
 |---|---|---|---|---|
 | Plan | Unmapped instrument | `skipped_unmapped` in summary + warning log | Blocked by `require_vendor_id` policy — no bad fetch possible | Run `06_seed_vendor_ids` notebook, re-run planner |
-| Plan | Planner crashes mid-write | Delta rows without manifests → stuck PENDING | Monitor flags stuck PENDING; re-run planner (idempotent: in-flight instruments skipped, missing manifests re-emitted on re-plan) | Re-run planner |
+| Plan | Planner crashes mid-write (rows inserted, manifests not) | Orphan-repair step at next planner start: lists `pending/`, finds PENDING rows whose manifest is absent | Rows marked ORPHANED (terminal, audited) → instrument becomes plannable again → fresh requests emitted in the same run. Reported as `orphans_repaired` in the summary | None — self-heals on next planner run |
 | Enqueue | Duplicate emission attempt | `skipped_inflight` in summary | Planner skips instruments with PENDING/LANDED requests | None |
 | Fetch | IBKR error / pacing / no data | Agent retries ×3 with backoff, then manifest → `failed/` with error_message | Transient: next planner run re-plans (watermark didn't advance). Persistent: triage per runbook §6.6 | Only for persistent errors |
 | Fetch | Gateway down / nightly restart | Agent logs "gateway is down — waiting"; work stays in pending/ | Auto-resume when port returns; Docker `restart:always` revives container | None |

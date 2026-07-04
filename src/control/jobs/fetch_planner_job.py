@@ -36,6 +36,7 @@ class FetchPlannerJob:
         config: ConfigNode,
         spark,
         fs_put,
+        fs_ls=None,
         stream_name: str = "daily",
         vendor: str = "ibkr",
         require_vendor_id: bool = True,
@@ -55,6 +56,9 @@ class FetchPlannerJob:
         self._stream_cfg  = getattr(config, stream_name)
         self._vendor      = vendor
         self._require_vendor_id = require_vendor_id
+        # fs_ls: callable(path) -> iterable with .path attrs (dbutils.fs.ls).
+        # None disables orphan repair (unit tests / environments without dbutils).
+        self._fs_ls = fs_ls
 
         catalog          = config.databricks.catalog
         raw_bucket       = config.aws.s3.raw
@@ -86,6 +90,8 @@ class FetchPlannerJob:
         today    = as_of_date or date.today()
         batch_id = f"batch_{self._stream_name}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
         interval = self._stream_cfg.intervals[0]
+
+        orphans_repaired = self._repair_orphaned_requests()
 
         instruments = self._universe.get_active_instruments(symbols=symbols or None)
         in_flight   = self._in_flight_instrument_ids()
@@ -161,10 +167,56 @@ class FetchPlannerJob:
             "skipped_noop":      skipped_noop,
             "skipped_inflight":  skipped_inflight,
             "skipped_unmapped":  skipped_unmapped,   # unmapped = blocked by policy, needs seeding
+            "orphans_repaired":  orphans_repaired,   # PENDING rows without manifests, marked ORPHANED
             "dry_run":           dry_run,
         }
         logger.info(f"FetchPlannerJob complete: {summary}")
         return summary
+
+    def _repair_orphaned_requests(self) -> int:
+        """
+        Crash-recovery: if a previous planner run died between the Delta insert
+        and the S3 manifest write, PENDING rows exist with no manifest — the
+        agent will never see them, and the in-flight check (status-only) would
+        skip the instrument forever. Repair: mark such rows ORPHANED so the
+        instrument becomes plannable again this very run (fresh requests +
+        manifests are then emitted normally). ORPHANED is terminal and audit-
+        preserving — we never delete rows.
+        """
+        if self._fs_ls is None:
+            return 0
+        rows = self._spark.sql(f"""
+            SELECT request_key, s3_manifest_path
+            FROM {self._catalog}.control.fetch_request
+            WHERE stream = '{self._stream_name}' AND status = 'PENDING'
+        """).collect()
+        if not rows:
+            return 0
+
+        # One listing of the pending prefix (not per-row HEADs)
+        pending_prefix = self._repo.pending_prefix(self._vendor)
+        try:
+            existing = {f.path.rstrip("/") for f in self._fs_ls(pending_prefix)}
+        except Exception:
+            existing = set()   # prefix absent = no manifests at all
+
+        orphaned = [r.request_key for r in rows
+                    if r.s3_manifest_path.rstrip("/") not in existing]
+        if not orphaned:
+            return 0
+
+        keys_sql = ", ".join(f"'{k}'" for k in orphaned)
+        self._spark.sql(f"""
+            UPDATE {self._catalog}.control.fetch_request
+            SET status = 'ORPHANED',
+                error_message = 'planner crash window: PENDING row had no manifest in pending/ — repaired {datetime.now(timezone.utc).isoformat()}'
+            WHERE request_key IN ({keys_sql})
+        """)
+        logger.warning(
+            f"Repaired {len(orphaned)} orphaned request(s) (PENDING without manifest) "
+            f"— instruments re-planned this run: {orphaned[:5]}{'…' if len(orphaned) > 5 else ''}"
+        )
+        return len(orphaned)
 
     def _load_instrument_enrichment(self) -> dict:
         """

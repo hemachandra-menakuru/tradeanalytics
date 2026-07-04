@@ -73,7 +73,9 @@ from src.control.jobs.fetch_planner_job import FetchPlannerJob
 # TODO(Phase 3+): vendor should come per-instrument from
 # reference.ticker_feed_config.preferred_vendor (column exists since Phase 3A),
 # not a job-level parameter. Job-level is correct while IBKR is the only vendor.
-job = FetchPlannerJob(config=config, spark=spark, fs_put=_fs_put, stream_name="daily", vendor=vendor)
+_fs_ls = dbutils.fs.ls if IS_DATABRICKS else None   # enables orphan repair on Databricks
+job = FetchPlannerJob(config=config, spark=spark, fs_put=_fs_put, fs_ls=_fs_ls,
+                      stream_name="daily", vendor=vendor)
 summary = job.run(symbols=symbols, as_of_date=as_of_date, dry_run=dry_run)
 
 print("=" * 60)
