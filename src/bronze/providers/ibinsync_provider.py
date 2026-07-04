@@ -216,8 +216,8 @@ class IBInsyncProvider(HistoricalDataProvider):
 
             records.append({
                 "symbol":        symbol,
-                "date":          bar_date,
-                "interval":      interval,
+                "bar_date":      bar_date.isoformat(),
+                "bar_interval":  interval,
                 "open":          float(bar.open),
                 "high":          float(bar.high),
                 "low":           float(bar.low),

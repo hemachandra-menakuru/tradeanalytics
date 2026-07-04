@@ -62,6 +62,45 @@ resources:
         phase:      "3"
         managed_by: dabs
 
+    raw_to_bronze:
+      name: "[${var.env}] Raw to Bronze Ingestion (Two-Plane)"
+      description: "Reconciles agent receipts, ingests landed raw payloads into Bronze, updates watermarks and job_run_log. CLAUDE.md §14 Stage 4."
+
+      # Manual runs until proven end-to-end; then schedule ~1h after the planner
+      # (e.g. "0 0 21 ? * MON-FRI" America/New_York) or a file-arrival trigger.
+
+      email_notifications:
+        on_failure:
+          - handh.stocks@gmail.com
+
+      tasks:
+        - task_key: raw_to_bronze
+          notebook_task:
+            notebook_path: "notebooks/bronze/raw_to_bronze.py"
+            base_parameters:
+              dry_run:          "false"
+              vendor:           "ibkr"
+              environment:      "${var.env}"
+              pipeline_version: "${var.pipeline_version}"
+          environment_key: serverless_env
+          timeout_seconds: 3600
+          max_retries: 0
+
+      max_concurrent_runs: 1
+
+      environments:
+        - environment_key: serverless_env
+          spec:
+            client: "2"
+            dependencies:
+              - pyyaml
+              - python-dotenv
+      tags:
+        project:    tradeanalytics
+        layer:      bronze
+        phase:      "3"
+        managed_by: dabs
+
     bronze_daily_ingestion:
       name: "[${var.env}] Bronze Daily Ingestion"
       description: "Ingests daily OHLCV market data from IBKR into Bronze Delta tables"
