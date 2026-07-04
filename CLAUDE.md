@@ -487,6 +487,24 @@ src/shared/
 
 ## 10. Known Issues & Technical Debt
 
+### ⚠️ Reference-data defect: instrument_id 45 pollution (found 2026-07-05, contained)
+`universe_sync` seeding attached THREE unrelated listings to instrument_id 45:
+BF.B (Brown Forman), BRK.B (Berkshire Hathaway), and dead placeholder 2602335D
+(Contra Hologic — listing closed via SCD-2 on 2026-07-05). Consequently
+`instrument_vendor_id` now holds TWO current ibkr mappings for instrument 45
+(conIds 4931 + 72063691). Verified CONTAINED to this single instrument (both
+uniqueness queries return only id 45). No pipeline impact — neither symbol is in
+the active fetch universe.
+**Fix required (reference-data surgery, do deliberately, not mid-flight):**
+1. Create proper `instrument` rows for BF.B and BRK.B; repoint their listings.
+2. Correct the vendor mappings to the new instrument_ids (NOTE: table is
+   append-only SCD-2 — check TBLPROPERTIES before attempting UPDATE; may need
+   append-based correction pattern).
+3. Root-cause `universe_sync`: dot-class/placeholder symbols evidently fell into
+   one instrument bucket. Add validation: (instrument_id, is_current=true) must
+   be UNIQUE in instrument_listing; same for (instrument_id, vendor, is_current)
+   in instrument_vendor_id. Fail the sync loudly on violation.
+
 ### ⚠️ MUST FIX BEFORE EXITING PHASE 3A — `e2e_corporate_action_validation` notebook blocked
 `notebooks/validation/e2e_corporate_action_validation.py` cannot run — blocked on Databricks
 cluster availability. Root cause: BYO VPC migration (2026-06-29) broke cluster bootstrap.
