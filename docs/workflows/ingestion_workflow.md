@@ -61,6 +61,67 @@ zero egress). Agent→Databricks = S3 files (raw payloads + receipts). Truth for
 humans/SQL = Delta control tables. The agent never touches Delta; Databricks
 never opens a network connection.
 
+## 2a. Parameters, configuration & outcomes per stage
+
+### Stage 1–2 — Planner (`notebooks/control/fetch_planner.py`)
+
+**Runtime parameters (widgets / env for local runs):**
+| Parameter | Default | Purpose |
+|---|---|---|
+| `symbols` | blank = all active | Scope to specific symbols (testing/backfill) |
+| `dry_run` | `false` | Plan + report only; write nothing |
+| `as_of_date` | blank = today (UTC) | Override "today" — REQUIRED for correct behaviour when run manually near the NZ/US date boundary |
+| `vendor` | `ibkr` | Which vendor queue to emit into |
+| `environment` | `dev` | Config environment |
+
+**Configuration consumed:**
+| Source | Keys | Effect |
+|---|---|---|
+| `config/streams/daily.yml` | `ingestion.batch_size_days` (30) | Chunk size for INCREMENTAL / GAP_FILL |
+| | `ingestion.backfill_chunk_days` (365) | Chunk size for INITIAL_LOAD / HISTORY_EXTENSION |
+| | `history.lookback_years`, `intervals` | Planning window, bar_interval |
+| `config/dev.yml` | `aws.s3.raw` | Raw bucket for manifests + land_to |
+| `reference.ticker_feed_config` | `is_active`, `target_start_date`, `batch_group` | Desired state per instrument |
+| `reference.instrument/…listing/…vendor_id` | enrichment JOIN | conId, exchange_mic, currency, asset_class into manifests |
+| Code-level policy | `require_vendor_id=True` | Unmapped instruments blocked (no widget — deliberate) |
+| Env | `PIPELINE_VERSION` | Stamped into manifest lineage |
+
+**Outcomes:** `fetch_request` rows (status=PENDING, one per chunk) · Contract-v2
+manifests in `control/fetch/<vendor>/pending/` · summary dict
+(`requests_emitted`, `skipped_noop`, `skipped_inflight`, `skipped_unmapped`).
+
+### Stage 3 — Fetch agent (`agents/fetch_agent/fetch_agent.py`)
+
+**Configuration (env vars in `fetch-agent-ibkr.service`; defaults in script):**
+| Env var | Default | Purpose |
+|---|---|---|
+| `TA_VENDOR` | `ibkr` | Which vendor queue this instance serves |
+| `TA_RAW_BUCKET` | `handh-trade-raw-use1` | Queue + landing bucket |
+| `TA_IB_HOST` / `TA_IB_PORT` | `127.0.0.1` / `4004` | Gateway (4001 when live trading) |
+| `TA_IB_CLIENT_ID` | `20` | Gateway clientId (see registry) |
+| `TA_POLL_SECONDS` | `60` | Idle poll interval |
+| `TA_PACING_SECONDS` | `2.0` | IBKR pacing between requests |
+| `TA_MAX_ATTEMPTS` | `3` | Retries per manifest before failed/ |
+| `TA_HEARTBEAT_SECONDS` | `3600` | Idle heartbeat interval |
+
+**Input:** one manifest (all fetch parameters arrive INSIDE it — the agent has
+no per-request config of its own; that's the contract's point).
+**Outcomes:** raw payload at `land_to/<request_key>.json` (`ohlcv_json_v1`:
+bars + instrument + fetch + lineage + `fetched_at/by`, `record_count`) ·
+enriched receipt in `done/` (adds `status`, `record_count`, `s3_data_path`,
+`landed_at`, `attempt_count`) or `failed/` (adds `error_message`).
+
+### Stage 4 — Raw→Bronze ingestion job *(Chunk 3 — parameters finalized at build)*
+
+**Planned parameters:** `ingest_date` scope (blank = all unreconciled) ·
+`dry_run` · `environment`.
+**Configuration:** `config/streams/daily.yml` (`table`, `rejected_table`),
+`config/quality/data_quality_rules.yml` (17 rules), catalog from `config/dev.yml`.
+**Outcomes:** Bronze appends (`market_data_daily` +
+`market_data_rejected`) · watermark upsert (`control.ingestion_watermark`) ·
+audit rows in `control.job_run_log` (first writer) · `fetch_request` →
+LANDED/INGESTED/FAILED · receipts archived to `done/archive/<date>/`.
+
 ## 3. State machine (`control.fetch_request.status`)
 
 ```
