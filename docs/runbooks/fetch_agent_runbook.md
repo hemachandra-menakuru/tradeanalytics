@@ -96,11 +96,16 @@ ibkrbox "sudo systemctl disable --now fetch-agent-ibkr"
 ## 3. Foreground mode (supervised runs / pre-systemd)
 
 ```bash
-ibkrbox "cd ~/fetch-agent-ibkr && venv/bin/python fetch_agent.py"
+# MUST use -t: without a TTY, Ctrl+C kills only the local ssh client and the
+# remote agent survives as an orphan (root cause of the 2026-07-04 4-orphan race)
+ssh -t -i ~/.ssh/handh-trade-ibkr-proxy.pem ubuntu@54.197.158.82 \
+  "cd ~/fetch-agent-ibkr && venv/bin/python fetch_agent.py"
 ```
-- Output streams to YOUR terminal only. Closing the terminal usually kills the
-  agent — but not always cleanly (see §6.1: the 4-orphan incident). ALWAYS stop
-  with Ctrl+C, and verify with `pgrep` afterwards.
+- Output streams to YOUR terminal only.
+- Stop with Ctrl+C (works because of -t), then ALWAYS verify:
+  `ibkrbox "pgrep -f 'venv/bin/python fetch_agent.py' || echo clean"`
+- Remote kill if an orphan survives anyway:
+  `ibkrbox "pkill -f 'venv/bin/python fetch_agent.py'"`
 - The flock guard makes accidental duplicates exit immediately.
 
 ---
