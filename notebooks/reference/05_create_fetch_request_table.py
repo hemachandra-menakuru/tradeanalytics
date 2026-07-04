@@ -29,8 +29,11 @@
 # MAGIC
 # MAGIC     -- What to fetch (self-contained — agent needs no joins)
 # MAGIC     instrument_id     BIGINT NOT NULL,
-# MAGIC     symbol            STRING NOT NULL,          -- denormalised for agent convenience
+# MAGIC     symbol            STRING NOT NULL,          -- denormalised for agent convenience; display only
 # MAGIC     vendor            STRING NOT NULL,          -- ibkr | polygon | ...
+# MAGIC     vendor_instrument_id STRING,                -- vendor's permanent key (IBKR conId) from
+# MAGIC                                                 -- reference.instrument_vendor_id; audit of which
+# MAGIC                                                 -- identity we fetched under (Contract v2, 2026-07-05)
 # MAGIC     stream            STRING NOT NULL,          -- daily | intraday | tick
 # MAGIC     bar_interval      STRING NOT NULL,          -- 1d | 1h | ... (never name a column 'interval')
 # MAGIC     start_date        DATE   NOT NULL,
