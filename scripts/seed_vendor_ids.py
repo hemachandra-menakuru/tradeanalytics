@@ -1,40 +1,46 @@
 #!/usr/bin/env python3
 """
-One-time supervised seeding of reference.instrument_vendor_id (vendor=ibkr).
+Vendor-ID discovery — Step 1 of 2 of the repeatable seeding flow.
 
-Why a SEED script instead of fetch-time symbol fallback:
-  - Seeding runs NOW, while every symbol in the universe is verifiably
-    current — ticker rename/reuse risk is ~zero at seed time.
-  - Output is reviewable SQL — a human eyeballs company/exchange per conId
-    BEFORE anything enters the reference table.
-  - After seeding, the planner's require_vendor_id policy guarantees no
-    fetch ever depends on a symbol lookup again.
+Two-plane split (CLAUDE.md §14):
+  Step 1 (THIS SCRIPT, runs on the Mac — gateway reachable):
+     qualify unmapped current listings via the EC2 IB Gateway and STAGE the
+     discovered mappings as JSON to
+        s3://handh-trade-raw-use1/reference/vendor_id_seed/ibkr/<UTC-timestamp>.json
+  Step 2 (notebooks/reference/06_load_vendor_id_seed.py, Databricks):
+     read the staged file, validate against existing mappings, INSERT new
+     rows into reference.instrument_vendor_id. Databricks remains the only
+     Delta writer.
 
-Runs LOCALLY on the Mac (uses the EC2 IB Gateway, clientId 99 = diagnostics).
-Reads the current universe from Databricks via Databricks Connect serverless,
-qualifies each symbol, prints INSERT statements to review and run in Databricks.
+Known IBKR symbology quirks handled: dot-class shares (BRK.B) are qualified
+using IBKR's space form (BRK B) automatically.
 
-Usage:
-    python scripts/seed_vendor_ids.py            # all unmapped current listings
+Usage:  python scripts/seed_vendor_ids.py
 """
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from datetime import datetime, timezone
 
 GATEWAY_HOST = "54.197.158.82"
 GATEWAY_PORT = 4004      # paper
 CLIENT_ID    = 99        # diagnostics clientId (CLAUDE.md registry)
 VENDOR       = "ibkr"
 CATALOG      = "tradeanalytics"
+RAW_BUCKET   = "handh-trade-raw-use1"
+STAGE_PREFIX = f"reference/vendor_id_seed/{VENDOR}"
+
+
+def to_ibkr_symbol(symbol: str) -> str:
+    """IBKR symbology: class shares use a space, not a dot (BRK.B -> BRK B)."""
+    return symbol.replace(".", " ")
 
 
 def main() -> int:
-    # 1. Current listings missing an ibkr mapping — from Delta
     from databricks.connect import DatabricksSession
     profile = os.environ.get("DATABRICKS_CONFIG_PROFILE", "handh-trade-aws")
     spark = DatabricksSession.builder.profile(profile).serverless(True).getOrCreate()
@@ -50,54 +56,63 @@ def main() -> int:
     """).collect()
 
     if not rows:
-        print("Nothing to seed — every current listing already has an ibkr mapping.")
+        print("Nothing to discover — every current listing already has a mapping.")
         return 0
-    print(f"{len(rows)} unmapped listing(s): {[r.symbol for r in rows]}\n")
+    print(f"{len(rows)} unmapped listing(s) to qualify\n")
 
-    # 2. Qualify each via the EC2 gateway
     from ib_insync import IB, Stock
     ib = IB()
     ib.connect(GATEWAY_HOST, GATEWAY_PORT, clientId=CLIENT_ID, timeout=30, readonly=True)
 
-    inserts, failures = [], []
+    mappings, failures = [], []
     for r in rows:
+        ibkr_sym = to_ibkr_symbol(r.symbol)
         try:
-            contract = Stock(r.symbol, "SMART", r.currency or "USD")
+            contract = Stock(ibkr_sym, "SMART", r.currency or "USD")
             ib.qualifyContracts(contract)
             if not contract.conId:
                 raise ValueError("qualification returned no conId")
-            desc = f"{contract.localSymbol} @ {contract.primaryExchange} ({contract.currency})"
-            print(f"  {r.symbol:<6} → conId {contract.conId:<12} {desc}")
-            inserts.append(
-                f"INSERT INTO {CATALOG}.reference.instrument_vendor_id\n"
-                f"    (instrument_id, vendor, vendor_instrument_id, vendor_exchange,\n"
-                f"     valid_from, is_current, notes, created_at)\n"
-                f"VALUES ({r.instrument_id}, '{VENDOR}', '{contract.conId}', "
-                f"'{contract.primaryExchange}',\n"
-                f"    current_date(), true, "
-                f"'seeded via scripts/seed_vendor_ids.py — verified {desc}', "
-                f"current_timestamp());"
-            )
+            print(f"  {r.symbol:<8} → conId {contract.conId:<12} "
+                  f"{contract.localSymbol} @ {contract.primaryExchange}")
+            mappings.append({
+                "instrument_id":        r.instrument_id,
+                "symbol":               r.symbol,
+                "vendor":               VENDOR,
+                "vendor_instrument_id": str(contract.conId),
+                "vendor_exchange":      contract.primaryExchange or None,
+                "vendor_symbol":        contract.localSymbol or ibkr_sym,
+                "currency":             contract.currency,
+            })
         except Exception as e:
-            failures.append((r.symbol, f"{type(e).__name__}: {e}"))
-            print(f"  {r.symbol:<6} → FAILED: {e}")
-        time.sleep(1)  # gentle pacing
-
+            failures.append({"symbol": r.symbol, "error": f"{type(e).__name__}: {e}"})
+            print(f"  {r.symbol:<8} → FAILED: {e}")
+        time.sleep(1)
     ib.disconnect()
 
-    # 3. Reviewable SQL
-    print("\n" + "=" * 70)
-    print("-- REVIEW each mapping above (symbol ↔ exchange ↔ conId), then run")
-    print("-- the following in a Databricks SQL cell:")
-    print("=" * 70 + "\n")
-    for stmt in inserts:
-        print(stmt + "\n")
+    # Stage to S3 for the Databricks loader notebook
+    import boto3
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    key = f"{STAGE_PREFIX}/{stamp}.json"
+    doc = {
+        "staged_at":     datetime.now(timezone.utc).isoformat(),
+        "staged_by":     "scripts/seed_vendor_ids.py",
+        "vendor":        VENDOR,
+        "gateway":       f"{GATEWAY_HOST}:{GATEWAY_PORT}",
+        "mapping_count": len(mappings),
+        "failures":      failures,
+        "mappings":      mappings,
+    }
+    boto3.client("s3").put_object(
+        Bucket=RAW_BUCKET, Key=key, Body=json.dumps(doc, indent=2).encode()
+    )
 
+    print(f"\n✅ Staged {len(mappings)} mapping(s) → s3://{RAW_BUCKET}/{key}")
     if failures:
-        print(f"-- ⚠ {len(failures)} symbol(s) failed qualification — investigate before seeding:")
-        for sym, err in failures:
-            print(f"--   {sym}: {err}")
-        return 1
+        print(f"⚠  {len(failures)} failure(s) recorded in the staged file for review:")
+        for f in failures:
+            print(f"   {f['symbol']}: {f['error']}")
+    print("\nNext: run notebooks/reference/06_load_vendor_id_seed.py in Databricks "
+          "to review and load the staged mappings.")
     return 0
 
 
