@@ -28,6 +28,7 @@ sequenceDiagram
     participant ING as Ingestion Job<br/>(Databricks serverless)
     participant BR as Bronze Delta<br/>+ watermark + job_run_log
 
+    PL->>S3Q: orphan repair: list pending/, PENDING rows w/o manifest → ORPHANED
     PL->>TFC: read desired state (+ watermark = actual)
     PL->>FR: INSERT requests (status=PENDING)
     PL->>S3Q: PUT manifests → pending/
@@ -88,7 +89,9 @@ never opens a network connection.
 
 **Outcomes:** `fetch_request` rows (status=PENDING, one per chunk) · Contract-v2
 manifests in `control/fetch/<vendor>/pending/` · summary dict
-(`requests_emitted`, `skipped_noop`, `skipped_inflight`, `skipped_unmapped`).
+(`requests_emitted`, `skipped_noop`, `skipped_inflight`, `skipped_unmapped`,
+`orphans_repaired`). Side effect at start: crash-window PENDING rows without
+manifests are marked ORPHANED and their instruments re-planned in the same run.
 
 ### Stage 3 — Fetch agent (`agents/fetch_agent/fetch_agent.py`)
 
