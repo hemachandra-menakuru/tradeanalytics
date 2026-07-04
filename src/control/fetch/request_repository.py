@@ -47,8 +47,10 @@ class FetchRequestRepository:
         self._raw_bucket = raw_bucket
         self._fs_put     = fs_put
 
-    def pending_prefix(self) -> str:
-        return f"s3://{self._raw_bucket}/control/fetch/pending"
+    def pending_prefix(self, vendor: str) -> str:
+        # Vendor-scoped queues: each vendor's agent polls only its own inbox
+        # (consumer-aligned queues; IAM locks each agent to its own prefix)
+        return f"s3://{self._raw_bucket}/control/fetch/{vendor}/pending"
 
     def save_all(self, requests: List[FetchRequest]) -> int:
         """Insert Delta rows, then write one manifest per request. Returns count."""
@@ -60,8 +62,7 @@ class FetchRequestRepository:
             self._write_manifest(req)
 
         logger.info(
-            f"FetchRequestRepository: {len(requests)} requests saved "
-            f"({self._table} + {self.pending_prefix()}/)"
+            f"FetchRequestRepository: {len(requests)} requests saved to {self._table}"
         )
         return len(requests)
 
@@ -110,7 +111,7 @@ class FetchRequestRepository:
         """)
 
     def _manifest_path(self, req: FetchRequest) -> str:
-        return f"{self.pending_prefix()}/{req.request_key}.json"
+        return f"{self.pending_prefix(req.vendor)}/{req.request_key}.json"
 
     def _write_manifest(self, req: FetchRequest) -> None:
         self._fs_put(

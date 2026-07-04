@@ -1,0 +1,18 @@
+[Unit]
+Description=TradeAnalytics Fetch Agent (Two-Plane bridge courier)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/fetch-agent
+ExecStart=/home/ubuntu/fetch-agent/venv/bin/python /home/ubuntu/fetch-agent/fetch_agent.py
+Restart=always
+RestartSec=15
+# Environment overrides if ever needed (defaults match current paper setup):
+# Environment=TA_IB_PORT=4001
+# Environment=TA_RAW_BUCKET=handh-trade-raw-use1
+
+[Install]
+WantedBy=multi-user.target
