@@ -250,37 +250,16 @@ print("✓ control.ingestion_command")
 
 # COMMAND ----------
 
-spark.sql("""
-CREATE TABLE IF NOT EXISTS tradeanalytics.control.job_run_log (
-    log_id              BIGINT    GENERATED ALWAYS AS IDENTITY,
-    job_run_id          STRING    NOT NULL,
-    instrument_id       BIGINT    NOT NULL,
-    stream              STRING    NOT NULL,
-    load_type           STRING    NOT NULL,
-    records_new         INT       NOT NULL DEFAULT 0,
-    records_amended     INT       NOT NULL DEFAULT 0,
-    records_rejected    INT       NOT NULL DEFAULT 0,
-    status              STRING    NOT NULL,
-    error_message       STRING,
-    started_at          TIMESTAMP NOT NULL,
-    completed_at        TIMESTAMP,
-
-    CONSTRAINT pk_job_run_log PRIMARY KEY (log_id),
-    CONSTRAINT fk_log_instr   FOREIGN KEY (instrument_id)
-                              REFERENCES tradeanalytics.reference.instrument(instrument_id)
-)
-USING DELTA
-COMMENT 'Append-only audit trail of every pipeline fetch. Never updated or deleted.'
-TBLPROPERTIES (
-    'delta.appendOnly'                  = 'true',
-    'delta.enableChangeDataFeed'        = 'true',
-    'delta.feature.allowColumnDefaults' = 'supported'
-)
-PARTITIONED BY (stream)
-""")
-# Valid status values: success | failed | skipped — enforced in Python (LoadType enum)
-# Valid load_type values: INITIAL_LOAD | INCREMENTAL | FORCE_RELOAD | GAP_FILL | HISTORY_EXT | NO_OP | SKIP
-print("✓ control.job_run_log")
+# NOTE (2026-07-05): control.job_run_log is defined and owned by
+# notebooks/reference/01_create_schemas_and_tables.py (the RICH schema:
+# batch_id, job_type, run_started_at/completed_at, duration_seconds, interval,
+# records_fetched/new/amended/skipped/rejected, fetch_start/end_date,
+# error_type, pipeline_version, cluster_id, vendor). The thinner CREATE that
+# used to live here was a stale DUPLICATE with a different schema (job_run_id,
+# started_at…) — it never won because 01 runs first, but it misled code that
+# read this file. Removed to eliminate the drift. Do not redefine job_run_log
+# here; edit 01 (and add a migration in notebooks/ops/schema_migrations.py).
+print("↷ control.job_run_log — owned by 01_create_schemas_and_tables.py (not redefined here)")
 
 # COMMAND ----------
 

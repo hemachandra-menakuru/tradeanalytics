@@ -301,18 +301,21 @@ class RawToBronzeJob:
 
     def _write_job_run_log(self, r, vs, wr, started) -> None:
         """First writer of control.job_run_log — one audit row per request."""
+        dur_s = (datetime.now(timezone.utc) - started).total_seconds()
         try:
             self._spark.sql(f"""
                 INSERT INTO {self._catalog}.control.job_run_log
-                    (job_run_id, instrument_id, stream, load_type,
-                     records_new, records_amended, records_rejected,
-                     status, started_at, completed_at, vendor)
+                    (batch_id, job_type, run_started_at, run_completed_at,
+                     duration_seconds, instrument_id, stream, interval, load_type,
+                     status, records_new, records_amended, records_skipped,
+                     records_rejected, pipeline_version, vendor)
                 VALUES
-                    ('{r.batch_id}/{r.request_key}', {r.instrument_id},
-                     '{self._stream_name}', '{r.load_type}',
-                     {wr.records_written}, {wr.records_amended}, {wr.rejected_written},
-                     'success', '{started.isoformat()}', current_timestamp(),
-                     '{r.vendor}')
+                    ('{r.batch_id}', 'raw_to_bronze',
+                     '{started.isoformat()}', current_timestamp(),
+                     {dur_s}, {r.instrument_id}, '{self._stream_name}',
+                     '{r.bar_interval}', '{r.load_type}', 'success',
+                     {wr.records_written}, {wr.records_amended}, {wr.records_skipped},
+                     {wr.rejected_written}, '{self._pipeline_version}', '{r.vendor}')
             """)
         except Exception as e:
             # Audit failure must never fail ingestion — log loudly, continue.

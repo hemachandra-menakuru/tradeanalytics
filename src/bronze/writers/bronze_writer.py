@@ -600,7 +600,7 @@ class BronzeWriter:
         try:
             row = self._spark.sql(f"""
                 SELECT COUNT(*) AS cnt FROM {full_table}
-                WHERE symbol = '{symbol}' AND interval = '{interval}'
+                WHERE symbol = '{symbol}' AND bar_interval = '{interval}'
             """).first()
             return int(row["cnt"]) if row else 0
         except Exception as e:
