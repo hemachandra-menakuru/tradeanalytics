@@ -1,0 +1,357 @@
+# End-to-End Data Ingestion Run Guide
+
+A complete operational guide to running the TradeAnalytics Bronze ingestion
+pipeline, written for an engineer with no prior project knowledge. Follow it
+top to bottom for a full run; jump to §11–13 for troubleshooting/recovery.
+
+**Companion docs:** [ingestion_workflow.md](../workflows/ingestion_workflow.md)
+(concepts + sequence diagram), [fetch_agent_runbook.md](fetch_agent_runbook.md)
+(agent ops), [systemd_service_guide.md](systemd_service_guide.md) (service model),
+CLAUDE.md §14 (architecture decision record).
+**Last validated end-to-end:** 2026-07-05 (SPY, 2016→2026, clean-room run).
+
+---
+
+## 1. Overview — what this pipeline does
+
+Ingests daily OHLCV market data from IBKR into the Bronze Delta layer, using a
+**Two-Plane Architecture** because Databricks Serverless has zero outbound
+network egress in this account (verified; see CLAUDE.md §14).
+
+```
+PLANE 1 — Databricks Serverless (data & intelligence)
+  ① fetch_planner ──writes──► control.fetch_request (Delta) + S3 manifests
+                                            │
+                    (S3 is the ONLY channel between planes)
+                                            ▼
+PLANE 2 — EC2 (connectivity)
+  ② fetch-agent-ibkr ──polls S3, fetches via IB Gateway──► S3 raw payloads
+                                            │
+PLANE 1 — Databricks Serverless
+  ③ raw_to_bronze ──reads raw, validates──► bronze.market_data_daily
+                    ──updates──► ingestion_watermark, job_run_log
+```
+
+Every arrow between planes is S3. Databricks never opens an outbound socket;
+the EC2 agent only ever connects outward (to localhost gateway + S3).
+
+---
+
+## 2. Prerequisites & access
+
+| Need | Detail |
+|---|---|
+| AWS CLI | Configured; `AWS_PROFILE=handh-trade` (set in shell). Account `311925399625`, region `us-east-1` |
+| Databricks CLI | v0.218.0+, profile `handh-trade-aws`, workspace `dbc-46a555ac-7f7b.cloud.databricks.com` |
+| Conda env | `tradeanalytics` (Python 3.11) — `/Users/hemachandra/anaconda3/envs/tradeanalytics/bin/python` |
+| SSH to EC2 | Key `~/.ssh/handh-trade-ibkr-proxy.pem`; alias `ibkrbox='ssh -i ~/.ssh/handh-trade-ibkr-proxy.pem ubuntu@54.197.158.82'` (add to `~/.zshrc`) |
+| Databricks workspace | Admin on `handh-dev`; Git folder synced to `feature/phase3-silver` |
+| Secrets | Databricks secret scope `tradeanalytics` holds `IBKR_ACCOUNT_ID`; EC2 `.env` holds paper creds |
+| IB Gateway | Paper account activated; container running on EC2 |
+
+---
+
+## 3. Object catalogue (everything by name)
+
+**AWS**
+| Object | Name |
+|---|---|
+| EC2 instance | `i-04eba7d6e9f3c6f28` (t4g.small), EIP `54.197.158.82` |
+| Security group | `sg-0bda28a18bc5bb48a` (SSH 22, IB API 4004, VNC 5900 — owner IP only) |
+| IAM instance profile / role | `handh-trade-ibkr-proxy-profile` / `handh-trade-ibkr-proxy-role` |
+| IAM policy | `handh-trade-fetch-agent-ibkr-s3` (scoped to `control/fetch/ibkr/*`, `ibkr/*`) |
+| Raw bucket | `s3://handh-trade-raw-use1` |
+| — queue prefix | `control/fetch/ibkr/{pending,done,failed}/` + `done/archive/<date>/` |
+| — landing prefix | `ibkr/ohlcv_daily/ingest_date=<date>/` |
+| — vendor-id staging | `reference/vendor_id_seed/ibkr/<timestamp>.json` |
+| Refined bucket (Delta) | `s3://handh-trade-refined-use1/{bronze,silver,gold}/` |
+
+**Databricks / Unity Catalog** (catalog `tradeanalytics`)
+| Object | Name |
+|---|---|
+| Control tables | `control.fetch_request`, `control.ingestion_watermark`, `control.job_run_log`, `control.ingestion_command` |
+| Reference tables | `reference.instrument`, `reference.instrument_listing`, `reference.instrument_vendor_id`, `reference.ticker_feed_config` |
+| Bronze tables | `bronze.market_data_daily`, `bronze.market_data_rejected` |
+| DABs jobs | `fetch_planner`, `raw_to_bronze`, `bronze_daily_ingestion` (dev-only, superseded) |
+| Notebooks | `notebooks/control/fetch_planner.py`, `notebooks/bronze/raw_to_bronze.py`, `notebooks/reference/06_seed_vendor_ids.py` |
+| EC2 service | `fetch-agent-ibkr.service` (systemd), dir `/home/ubuntu/fetch-agent-ibkr/` |
+
+---
+
+## 4. Dependency order (must hold before a run)
+
+```
+reference.instrument_vendor_id seeded (conIds)   ← §7 one-time
+        └─► fetch-agent-ibkr service ACTIVE       ← §6 check
+                └─► bundle deployed (latest code) ← §5
+                        └─► RUN: planner → agent → raw_to_bronze  ← §8
+```
+If any upstream box is not satisfied, the run will stall or skip. §8 checks each.
+
+---
+
+## 5. Deploy the code (before any run after a code change)
+
+Three cache layers — refresh the ones affected by your change:
+
+```bash
+# 1. Bundle (what the scheduled/UI jobs run) — always after code changes
+cd /Users/hemachandra/projects/tradeanalytics
+databricks bundle validate
+databricks bundle deploy --var "pipeline_version=$(git rev-parse --short HEAD)"
+#   validate: catches YAML/spec errors before hitting the API
+#   deploy:   uploads notebooks + src to .bundle/.../files and updates jobs
+
+# 2. Agent file (only if agents/fetch_agent/fetch_agent.py changed)
+scp -i ~/.ssh/handh-trade-ibkr-proxy.pem \
+  agents/fetch_agent/fetch_agent.py ubuntu@54.197.158.82:~/fetch-agent-ibkr/
+ibkrbox "sudo systemctl restart fetch-agent-ibkr"
+
+# 3. Interactive notebooks (06_seed etc.): Pull in the Databricks Git folder,
+#    and TERMINATE the serverless session if src/ modules changed (warm sessions
+#    cache imports).
+```
+**Success:** `Validation OK!` then `Deployment complete!`.
+
+---
+
+## 6. Pre-run health checks
+
+```bash
+# Agent alive?  (expect: active)
+ibkrbox "systemctl is-active fetch-agent-ibkr"
+
+# Gateway container up + port open?  (expect: running, PORT-OPEN)
+ibkrbox "docker ps --format '{{.Names}} {{.Status}}' && (nc -z localhost 4004 && echo PORT-OPEN || echo PORT-CLOSED)"
+
+# Exactly one agent process?  (expect: 1 line)
+ibkrbox "pgrep -f 'venv/bin/python fetch_agent.py'"
+
+# Queue empty from a prior run?  (expect: 0 / 0)
+aws s3 ls s3://handh-trade-raw-use1/control/fetch/ibkr/pending/ | wc -l
+```
+If the agent is `inactive`: `ibkrbox "sudo systemctl start fetch-agent-ibkr"`.
+If the gateway is down: §11.3.
+
+---
+
+## 7. One-time prerequisite — seed vendor IDs
+
+Required before the planner will emit for any instrument (the `require_vendor_id`
+policy blocks unmapped instruments). Fully Databricks-run; agent must be active.
+
+1. Databricks → open `notebooks/reference/06_seed_vendor_ids.py` → Serverless → **Run all**.
+2. It submits a `QUALIFY_INSTRUMENTS` manifest; the agent qualifies each symbol
+   (~1s each) and returns conIds; the notebook loads new-only, refuses conflicts.
+3. **Validate:**
+   ```sql
+   SELECT vendor, is_current, COUNT(*) FROM tradeanalytics.reference.instrument_vendor_id
+   GROUP BY vendor, is_current;                       -- expect ibkr/true ≈ 505
+   ```
+   Re-runnable anytime (differential/idempotent). Failures (dead tickers like
+   `2602335D`) are reported, not loaded.
+
+---
+
+## 8. Run the pipeline (the core sequence)
+
+### Stage A — Planner (Databricks serverless)
+Databricks → `fetch_planner` notebook (fresh serverless session) → widgets:
+`symbols`=`SPY` (blank = all active), `dry_run`=`false`, `vendor`=`ibkr` → **Run all**.
+
+**Expected summary:**
+```
+requests_emitted   11        (or 1 if incremental, 0 if up to date)
+skipped_noop       []
+skipped_inflight   []
+skipped_unmapped   []        (non-empty = §7 not done for those symbols)
+orphans_repaired   0
+```
+**Validate:**
+```sql
+SELECT status, COUNT(*) FROM tradeanalytics.control.fetch_request GROUP BY status;  -- PENDING = N
+```
+```bash
+aws s3 ls s3://handh-trade-raw-use1/control/fetch/ibkr/pending/ | wc -l             -- = N
+```
+
+### Stage B — Agent (EC2, automatic)
+No action — the always-on agent picks up manifests within ~60s. Watch it:
+```bash
+ibkrbox "journalctl -u fetch-agent-ibkr -f"
+```
+**Expected:** `N pending manifest(s)` → `... LANDED ~250 bars → s3://...` × N. Ctrl+C stops watching (not the service).
+**Validate:**
+```bash
+aws s3 ls s3://handh-trade-raw-use1/control/fetch/ibkr/done/   | grep -c batch_daily   # = N
+aws s3 ls s3://handh-trade-raw-use1/control/fetch/ibkr/failed/ | wc -l                  # = 0
+aws s3 ls s3://handh-trade-raw-use1/ibkr/ohlcv_daily/ --recursive | grep -c json        # = N
+```
+
+### Stage C — Raw → Bronze (Databricks serverless)
+Databricks → Workflows → **[dev] Raw to Bronze Ingestion (Two-Plane)** → Run now
+(defaults: dry_run=false, vendor=ibkr).
+
+**Expected summary (ZERO warnings/errors):**
+```
+landed              N
+failed              0
+requests_ingested   N
+records_written     ~2600/instrument
+records_rejected    0
+receipts_archived   N
+```
+
+### Stage D — Final validation
+```sql
+SELECT status, COUNT(*) FROM tradeanalytics.control.fetch_request GROUP BY status;   -- INGESTED = N
+SELECT source, COUNT(*) bars, MIN(bar_date) e, MAX(bar_date) l
+  FROM tradeanalytics.bronze.market_data_daily GROUP BY source;                      -- ibkr, ~2639/instr
+SELECT instrument_id, record_count, latest_date FROM tradeanalytics.control.ingestion_watermark;  -- count > 0
+SELECT job_type, records_new, status FROM tradeanalytics.control.job_run_log
+  ORDER BY run_started_at DESC LIMIT 20;                                             -- raw_to_bronze, success
+```
+**Success criteria:** all requests INGESTED · Bronze bar count matches · watermark
+`record_count` > 0 (not 0) · one `job_run_log` row per request, `status=success` ·
+`failed/` empty · contiguous chunk dates (`end_date+1 = next start_date`, no gaps).
+
+---
+
+## 9. Monitoring & observability
+
+| Signal | Where | Healthy |
+|---|---|---|
+| Agent liveness | `ibkrbox "journalctl -u fetch-agent-ibkr -n 20"` | hourly `heartbeat — idle` lines |
+| Agent service | `ibkrbox "systemctl status fetch-agent-ibkr"` | `active (running)` |
+| Work state (primary dashboard) | SQL: `SELECT status, COUNT(*) FROM control.fetch_request GROUP BY status` | no long-lived PENDING/LANDED |
+| Stuck work | SQL: `... WHERE status='PENDING' AND requested_at < now() - INTERVAL 2 HOURS` | 0 rows |
+| Audit trail | `control.job_run_log` | one row per ingested request |
+| Rejected data | `bronze.market_data_rejected` | reviewed if non-empty |
+| Job failures | Databricks job email (`handh.stocks@gmail.com`) | none |
+| Queue depth | `aws s3 ls .../pending/ \| wc -l` | 0 between runs |
+
+---
+
+## 10. Operational checklist (production run)
+
+- [ ] `AWS_PROFILE=handh-trade` set; `databricks bundle validate` passes
+- [ ] Latest code deployed (§5); agent restarted if its file changed
+- [ ] Agent `active`; exactly one process; gateway `PORT-OPEN`
+- [ ] Vendor IDs seeded for all target instruments (§7)
+- [ ] Queue empty (`pending/` = 0) before starting
+- [ ] Planner run → summary sane (no unexpected `skipped_unmapped`)
+- [ ] Agent drained (`done/` = N, `failed/` = 0)
+- [ ] `raw_to_bronze` run → zero warnings
+- [ ] Stage-D validation all green
+- [ ] `bronze.market_data_daily appendOnly` still `true` (never left off)
+
+---
+
+## 11. Troubleshooting
+
+**11.1 Planner: `skipped_unmapped` non-empty** — instrument lacks a current
+ibkr mapping. *Fix:* run §7 seeding, re-run planner. Never bypass with symbol
+fetching (silent-wrong-data risk).
+
+**11.2 Agent: `unsupported contract_version` / `unknown task_type` → failed/** —
+agent code older than the manifest. *Fix:* redeploy agent (§5 step 2), then
+re-emit (delete affected rows + failed manifests, re-run planner).
+
+**11.3 Agent: `gateway is down — waiting`** — IB Gateway not reachable.
+*Diagnose:* `ibkrbox "docker logs ibkr-gateway --tail 20"`; VNC `vnc://54.197.158.82:5900`.
+*Fix:* `ibkrbox "cd ~/ibkr-gateway && docker compose restart"`; wait ~60s for `Login has completed`. Newly-created paper account "Application In Progress" → wait for IBKR (next business day).
+
+**11.4 Multiple agents racing / stale-code errors** — `pgrep` shows >1 PID.
+*Fix:* `ibkrbox "pkill -f 'venv/bin/python fetch_agent.py'"` then `systemctl start`.
+Prevented now by flock guard + systemd, but foreground runs without `ssh -t` can still orphan (use `ssh -t` for any manual foreground run).
+
+**11.5 raw_to_bronze: `UNRESOLVED_COLUMN interval`** — stale column ref;
+fixed 2026-07-05 (`bar_interval`). If seen, code is behind — redeploy bundle.
+
+**11.6 raw_to_bronze: `job_run_log` insert fails** — schema drift between INSERT
+and live table. *Diagnose:* `DESCRIBE TABLE control.job_run_log`; align INSERT to
+live columns (owned by `01_create_schemas_and_tables.py`, not `03`). Non-fatal
+(ingestion still completes).
+
+**11.7 `DELTA_CANNOT_MODIFY_APPEND_ONLY`** — tried to DELETE Bronze/job_run_log.
+Expected — they're append-only. Only for deliberate teardown: `ALTER TABLE …
+SET TBLPROPERTIES (delta.appendOnly=false)` → DELETE → **immediately re-set true**.
+
+**11.8 Notebook runs old code** — one of the four caches stale (§5): bundle,
+Git folder, warm serverless session, or agent process. Match the cache to the
+artifact and refresh.
+
+**11.9 `command not found: ibkrbox`** — alias not in this shell: `source ~/.zshrc`
+or use the full `ssh -i … ` command.
+
+---
+
+## 12. Failure recovery (safe by design)
+
+The system is idempotent end-to-end; recovery is almost always "re-run".
+
+| Situation | Recovery |
+|---|---|
+| Planner crashed mid-write | Re-run planner — orphan-repair marks PENDING-without-manifest rows ORPHANED and re-plans them (self-healing) |
+| Agent down during a run | Manifests wait in `pending/`; `systemctl start` → drains backlog |
+| Fetch failed (transient) | No action — watermark unchanged, next planner run re-plans the gap |
+| Fetch failed (persistent, e.g. delisted) | Triage `error_message` in `failed/`; pause ticker (`UPDATE ticker_feed_config SET is_active=false`) |
+| raw_to_bronze crashed mid-run | Re-run — reconcile idempotent, Bronze dedup absorbs partial writes, INGESTED requests skipped |
+| Wrong/suspect data | Reprocess from immutable raw payloads (never re-call IBKR) |
+| EC2 rebooted | Auto-recovers (~2 min): systemd + docker restart cascade |
+| EC2 destroyed | Rebuild ~30 min (runbook §6.8); zero data loss (state in S3/Delta) |
+
+**Re-running a completed instrument** is safe: planner derives INCREMENTAL from
+the watermark (not a re-backfill); overlapping bars dedup to zero new rows.
+
+---
+
+## 13. Rollback & cleanup (test/teardown only — NEVER production Bronze)
+
+Full clean-room teardown for one symbol (used 2026-07-05):
+```sql
+-- control tables (not append-only): direct DELETE
+DELETE FROM tradeanalytics.control.fetch_request       WHERE symbol='SPY';
+DELETE FROM tradeanalytics.control.ingestion_watermark WHERE instrument_id=(
+  SELECT instrument_id FROM tradeanalytics.reference.instrument_listing
+  WHERE symbol='SPY' AND is_current=true);
+-- append-only tables: toggle off, delete, RE-LOCK immediately
+ALTER TABLE tradeanalytics.bronze.market_data_daily SET TBLPROPERTIES (delta.appendOnly=false);
+DELETE FROM tradeanalytics.bronze.market_data_daily WHERE symbol='SPY';
+ALTER TABLE tradeanalytics.bronze.market_data_daily SET TBLPROPERTIES (delta.appendOnly=true);
+-- (repeat toggle pattern for market_data_rejected, job_run_log)
+```
+```bash
+# S3 raw + queue
+aws s3 rm s3://handh-trade-raw-use1/ibkr/ohlcv_daily/       --recursive --quiet
+aws s3 rm s3://handh-trade-raw-use1/control/fetch/ibkr/     --recursive --quiet
+```
+**Always verify `appendOnly=true` is restored afterward:**
+`SHOW TBLPROPERTIES tradeanalytics.bronze.market_data_daily (delta.appendOnly);`
+
+---
+
+## 14. Best practices, notes & known limitations
+
+**Best practices**
+- Control the WORK (SQL on control tables), not the PROCESS, for day-to-day ops.
+- Never delete Bronze in production — reprocess from raw.
+- Never bypass `require_vendor_id`; seed conIds first.
+- After any code change, deploy the right cache layer(s) before running (§5).
+- Run planner with `dry_run=true` first when changing scope/config.
+
+**Operational notes**
+- Schedules are OFF (manual runs) until intentionally enabled. Target rhythm:
+  planner 7pm ET, raw_to_bronze 8pm ET, Mon–Fri; agent is always-on (no schedule).
+- Backfill chunk = 365d, incremental = 30d (config `daily.yml`). IBKR pacing is
+  per-request, so fewer/larger chunks = faster backfill.
+- All audit timestamps are UTC; bar dates are US-exchange calendar dates. Run the
+  planner with explicit `as_of_date` near the NZ/US date boundary.
+
+**Known limitations**
+- EC2 hardware failure is not self-healing (manual ~30-min rebuild).
+- Single-worker per vendor queue (IBKR pacing is the ceiling; parallelism wouldn't help).
+- Reference-data defect: instrument_id 45 has multiple listings (BF.B/BRK.B) —
+  contained, not in active universe; surgery pending (CLAUDE.md §10).
+- `bronze_daily_ingestion` job cannot run in cloud (no egress) — local dev tool only.
+</content>
