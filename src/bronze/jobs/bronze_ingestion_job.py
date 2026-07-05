@@ -1,7 +1,15 @@
 
 """
-TradeAnalytics Bronze Ingestion Job
-=====================================
+TradeAnalytics Bronze Ingestion Job — DEV / AD-HOC PATH
+========================================================
+⚠ SUPERSEDED for production (2026-07-05) by the Two-Plane pipeline
+(CLAUDE.md §14): FetchPlannerJob → EC2 fetch agent → RawToBronzeJob.
+This class remains the LOCAL DEV / AD-HOC tool: fetch-inline via the provider
+chain + direct Bronze write, driven from notebooks/bronze/bronze_daily_ingestion.py
+on the Mac (Databricks Connect). It cannot run as a cloud job — serverless has
+no egress to any IBKR gateway, and the production-provider guard blocks the
+yahoo fallback by design. Ad-hoc runs bypass fetch_request/job_run_log audit.
+
 Orchestrates the complete Bronze ingestion pipeline for one stream.
 
 Flow per symbol:

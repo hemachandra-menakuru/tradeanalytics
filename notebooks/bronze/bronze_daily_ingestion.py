@@ -1,14 +1,29 @@
 # Databricks notebook source
-# TradeAnalytics — Bronze Daily Ingestion
+# TradeAnalytics — Bronze Daily Ingestion  ⚠ DEV / AD-HOC TOOL, NOT the production path
 #
-# Runs on (auto-detected):
-#   1. Databricks SERVERLESS  — primary scheduled path (deps from job environment
-#      spec in databricks.yml, mirroring requirements-serverless.txt)
-#   2. Databricks classic cluster — fallback compute only (same code path)
-#   3. Local Mac (Databricks Connect or plain python) — development / IBKR REST path
+# ─── STATUS (2026-07-05) ────────────────────────────────────────────────────
+# SUPERSEDED for production by the Two-Plane trio (CLAUDE.md §14):
+#   fetch_planner (serverless) → EC2 fetch agent → raw_to_bronze (serverless)
+# This notebook remains ONLY as the LOCAL DEV / AD-HOC path: it fetches
+# inline via the provider chain and writes Bronze directly — useful for
+# quick experiments and for exercising the provider code end-to-end.
 #
-# Provider selection is config-driven (sources.yml priority chain) with a
-# production guard: yahoo can never silently become the production source.
+# WHERE TO RUN — local Mac ONLY (conda env `tradeanalytics`):
+#   cd ~/pr/tradeanalytics
+#   INGEST_DRY_RUN=true INGEST_SYMBOLS=SPY \
+#     python -c "exec(open('notebooks/bronze/bronze_daily_ingestion.py').read())"
+#   Python (incl. IBKR calls) runs on the Mac; Spark writes go through
+#   Databricks Connect (serverless) to Unity Catalog.
+#
+# WHY IT CANNOT RUN AS A CLOUD JOB: Databricks serverless has zero egress —
+# ibkr (localhost REST) and ibinsync (EC2, SG-blocked) both fail their health
+# checks, and the production guard (sources.production_providers) then raises
+# rather than silently ingesting from yahoo. This is intentional.
+#
+# NOTE: writes are dedup-safe against the production path (Bronze Layer-2
+# classify), but ad-hoc runs bypass control.fetch_request / job_run_log —
+# there is NO queue audit trail for data ingested this way.
+# ────────────────────────────────────────────────────────────────────────────
 
 # COMMAND ----------
 # ── Environment detection ────────────────────────────────────────────────────

@@ -102,8 +102,8 @@ resources:
         managed_by: dabs
 
     bronze_daily_ingestion:
-      name: "[${var.env}] Bronze Daily Ingestion"
-      description: "Ingests daily OHLCV market data from IBKR into Bronze Delta tables"
+      name: "[${var.env}] Bronze Daily Ingestion (DEV TOOL — superseded)"
+      description: "⚠ SUPERSEDED by fetch_planner + EC2 agent + raw_to_bronze (CLAUDE.md §14). Dev/ad-hoc only, and only from a LOCAL Mac run — as a cloud job it cannot reach IBKR (no serverless egress) and the production-provider guard will fail it rather than fall back to yahoo."
 
       schedule:
         quartz_cron_expression: "0 0 19 * * ?"
