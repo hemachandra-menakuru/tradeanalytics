@@ -354,4 +354,249 @@ aws s3 rm s3://handh-trade-raw-use1/control/fetch/ibkr/     --recursive --quiet
 - Reference-data defect: instrument_id 45 has multiple listings (BF.B/BRK.B) —
   contained, not in active universe; surgery pending (CLAUDE.md §10).
 - `bronze_daily_ingestion` job cannot run in cloud (no egress) — local dev tool only.
+
+---
+
+## 15. Managing instruments (operational reference)
+
+> ⚠️ **Schema-drift warning.** Two DDL notebooks exist
+> (`01_create_reference_tables.py` and `01_create_schemas_and_tables.py`) with
+> slightly different column sets for some tables (a known issue — same class as
+> the job_run_log drift). **Before running any INSERT/UPDATE below, confirm the
+> live columns** with `DESCRIBE TABLE tradeanalytics.reference.<table>` and adjust.
+> The examples use the columns verified present on 2026-07-05.
+
+### 15.1 The control & reference tables — purpose and how they link
+
+**Mental model — three questions:**
+- **Reference tables = WHAT exists and WHAT we want** (instruments, listings, desired feed config)
+- **Control tables = WHAT has happened and WHAT to do next** (watermarks, work queue, audit, commands)
+- The planner DERIVES work by comparing *desired* (ticker_feed_config) vs *actual* (ingestion_watermark).
+
+| Table | Plane | Purpose | Key | Links to |
+|---|---|---|---|---|
+| `reference.instrument` | ref | Permanent master record, one per financial instrument | `instrument_id` (BIGINT identity) | root of everything |
+| `reference.instrument_listing` | ref | Symbol / exchange / currency (SCD-2, `is_current`) | `listing_id`; FK `instrument_id` | → instrument |
+| `reference.instrument_vendor_id` | ref | Vendor IDs (IBKR conId etc.), SCD-2, append-only | `vendor_mapping_id`; FK `instrument_id` | → instrument |
+| `reference.universe_membership` | ref | Which instruments belong to which universe (SP500…) | `membership_id`; FK `instrument_id` | → instrument |
+| `reference.ticker_feed_config` | ref | **DESIRED STATE**: target dates, is_active, batch_group, priority | `config_id`; FK `instrument_id` | → instrument; read by planner |
+| `control.ingestion_watermark` | ctl | **ACTUAL STATE**: earliest/latest date fetched, record_count | `instrument_id + stream` | ← written by raw_to_bronze |
+| `control.fetch_request` | ctl | Work queue: one row per fetch chunk, PENDING→INGESTED | `request_id`; `request_key` | ← planner, → raw_to_bronze |
+| `control.job_run_log` | ctl | Append-only audit: one row per ingested chunk | `log_id` | ← raw_to_bronze |
+| `control.ingestion_command` | ctl | Operator one-offs (FORCE_RELOAD, PAUSE…) consumed once | `command_id` | read by planner |
+
+**The join key everywhere is `instrument_id`.** Symbol is a display attribute in
+`instrument_listing` only — never join on it.
+
+```
+instrument (id=505, SPY)
+  ├── instrument_listing   (symbol=SPY, exchange_mic=ARCX, is_current=true)
+  ├── instrument_vendor_id (vendor=ibkr, vendor_instrument_id=756733, is_current=true)
+  ├── universe_membership  (universe_code=SP500)
+  └── ticker_feed_config   (is_active=true, target_start_date=2016-01-01) ── desired
+                                                                              ▲
+control.ingestion_watermark (instrument_id=505, latest_date=2026-07-02) ── actual
+        planner compares desired vs actual → control.fetch_request (work)
+```
+
+### 15.2 Which instruments are active — and how to check
+
+"Active for fetching" = a row in `ticker_feed_config` with `is_active = true`.
+(An instrument can exist and be mapped but NOT be fetched if inactive.)
+
+```sql
+-- Currently ACTIVE instruments (what the planner will fetch)
+SELECT fc.instrument_id, l.symbol, fc.stream, fc.target_start_date,
+       fc.batch_group, fc.priority, fc.is_active
+FROM tradeanalytics.reference.ticker_feed_config fc
+JOIN tradeanalytics.reference.instrument_listing l
+  ON l.instrument_id = fc.instrument_id AND l.is_current = true
+WHERE fc.is_active = true
+ORDER BY l.symbol;
+```
+```sql
+-- Full picture: config vs mapping vs actual watermark (one row per instrument)
+SELECT l.symbol, fc.is_active, fc.target_start_date,
+       v.vendor_instrument_id AS ibkr_conid,
+       w.latest_date, w.record_count
+FROM tradeanalytics.reference.instrument_listing l
+LEFT JOIN tradeanalytics.reference.ticker_feed_config fc
+       ON fc.instrument_id = l.instrument_id
+LEFT JOIN tradeanalytics.reference.instrument_vendor_id v
+       ON v.instrument_id = l.instrument_id AND v.vendor='ibkr' AND v.is_current=true
+LEFT JOIN tradeanalytics.control.ingestion_watermark w
+       ON w.instrument_id = l.instrument_id AND w.stream='daily'
+WHERE l.is_current = true
+ORDER BY l.symbol;
+```
+
+### 15.3 Activate / deactivate an instrument (single SQL)
+
+```sql
+-- PAUSE fetching (planner stops emitting for it; existing Bronze untouched)
+UPDATE tradeanalytics.reference.ticker_feed_config
+SET is_active = false, updated_at = current_timestamp()
+WHERE instrument_id = (SELECT instrument_id FROM tradeanalytics.reference.instrument_listing
+                       WHERE symbol = 'TSLA' AND is_current = true);
+
+-- RESUME fetching
+UPDATE tradeanalytics.reference.ticker_feed_config
+SET is_active = true, updated_at = current_timestamp()
+WHERE instrument_id = (SELECT instrument_id FROM tradeanalytics.reference.instrument_listing
+                       WHERE symbol = 'TSLA' AND is_current = true);
+```
+**Propagation:** takes effect on the **next planner run** — no code change, no
+restart. Deactivate does NOT delete anything; it just stops future fetches.
+
+### 15.4 Add a NEW instrument (all tables, in order)
+
+Four reference tables must get rows, then vendor-ID seeding, then it's fetchable.
+`instrument_id` is auto-generated — capture it after the first insert.
+
+```sql
+-- STEP 1: master record (asset_class required). instrument_id auto-assigned.
+INSERT INTO tradeanalytics.reference.instrument (isin, figi, asset_class, is_active, created_at, updated_at)
+VALUES (NULL, NULL, 'equity', true, current_timestamp(), current_timestamp());
+
+-- capture the new id (most recent for this asset_class, or look it up by a known field)
+-- e.g.: SELECT MAX(instrument_id) AS new_id FROM tradeanalytics.reference.instrument;
+-- Assume it returned 777 for the examples below.
+
+-- STEP 2: listing (symbol/exchange — SCD-2, is_current=true)
+INSERT INTO tradeanalytics.reference.instrument_listing
+  (instrument_id, symbol, company_name, exchange, exchange_mic, currency,
+   valid_from, is_current, created_at)
+VALUES (777, 'AMD', 'Advanced Micro Devices', 'SMART', 'XNAS', 'USD',
+        current_date(), true, current_timestamp());
+
+-- STEP 3: universe membership (optional but recommended for grouping)
+INSERT INTO tradeanalytics.reference.universe_membership
+  (instrument_id, universe_code, source_etf, valid_from, is_current, created_at, updated_at)
+VALUES (777, 'SP500', 'MANUAL', current_date(), true, current_timestamp(), current_timestamp());
+
+-- STEP 4: feed config = DESIRED STATE (this is what makes it fetchable)
+INSERT INTO tradeanalytics.reference.ticker_feed_config
+  (instrument_id, stream, target_start_date, run_frequency, batch_group,
+   priority, is_active, max_lookback_days, created_at, updated_at, created_by)
+VALUES (777, 'daily', DATE'2016-01-01', 'daily', 'A',
+        5, true, 3650, current_timestamp(), current_timestamp(), 'ops-manual');
+```
+```
+-- STEP 5: seed the IBKR conId (agent must be running)
+--   Databricks → notebooks/reference/06_seed_vendor_ids.py → Run all
+--   (differential: qualifies only the new unmapped AMD; loads its conId)
+```
+```sql
+-- STEP 6: verify readiness (all four should be populated)
+SELECT
+  (SELECT COUNT(*) FROM tradeanalytics.reference.instrument_listing   WHERE instrument_id=777 AND is_current=true) listing,
+  (SELECT COUNT(*) FROM tradeanalytics.reference.ticker_feed_config   WHERE instrument_id=777 AND is_active=true)  feed,
+  (SELECT COUNT(*) FROM tradeanalytics.reference.instrument_vendor_id WHERE instrument_id=777 AND vendor='ibkr' AND is_current=true) conid;
+-- expect 1,1,1 → next planner run will INITIAL_LOAD it
+```
+**Then:** run the planner (blank symbols = all active, or `symbols=AMD`). It sees
+no watermark → derives INITIAL_LOAD from `target_start_date` → agent fetches →
+raw_to_bronze ingests. **Do not skip STEP 5** — the `require_vendor_id` policy
+blocks any instrument without a current conId (never falls back to symbol).
+
+### 15.5 Change history depth (e.g. 10 → 15 years)
+
+History depth is **desired state** in `ticker_feed_config.target_start_date`.
+Move it earlier and the planner derives a HISTORY_EXTENSION for the uncovered
+older range on the next run.
+
+```sql
+-- Extend ALL active instruments back to 2011 (15y from 2026)
+UPDATE tradeanalytics.reference.ticker_feed_config
+SET target_start_date = DATE'2011-01-01', updated_at = current_timestamp()
+WHERE is_active = true AND target_start_date > DATE'2011-01-01';
+
+-- Or one instrument:
+UPDATE tradeanalytics.reference.ticker_feed_config
+SET target_start_date = DATE'2011-01-01', updated_at = current_timestamp()
+WHERE instrument_id = (SELECT instrument_id FROM tradeanalytics.reference.instrument_listing
+                       WHERE symbol='SPY' AND is_current=true);
+```
+**What happens next run:**
+1. Planner reads watermark → `earliest_date = 2016-01-01`; desired start now 2011-01-01.
+2. `earliest_date > target_start` → derives **HISTORY_EXTENSION** for 2011-01-01 → 2015-12-31.
+3. Chunked at 365d (backfill size) → ~5 new fetch_request chunks per instrument.
+4. Agent fetches; raw_to_bronze appends; watermark `earliest_date` moves back to 2011.
+
+**Dependencies / impacts:**
+- The instrument must already have a conId (existing instruments do).
+- IBKR must actually *have* data that far back for the symbol (older or recently
+  listed names may return fewer years — the gap simply won't fill, no error).
+- Bronze is append-only; extension only ADDS older rows, never rewrites existing.
+- `max_lookback_days` is a guardrail cap — if set (e.g. 3650 = 10y), it can
+  clamp the derived start. To truly allow 15y, ensure `max_lookback_days` ≥ 5475
+  (or NULL) as well:
+  ```sql
+  UPDATE tradeanalytics.reference.ticker_feed_config
+  SET max_lookback_days = 5475 WHERE is_active = true;
+  ```
+
+### 15.6 Common operational scenarios (copy-paste SQL)
+
+```sql
+-- Force a full reload of one instrument (operator one-off; planner consumes it)
+INSERT INTO tradeanalytics.control.ingestion_command
+  (instrument_id, action, requested_at, status)
+VALUES (505, 'FORCE_RELOAD', current_timestamp(), 'PENDING');
+--   ⚠ verify column names first: DESCRIBE TABLE control.ingestion_command
+
+-- Move an instrument to a different batch group (staging large backfills)
+UPDATE tradeanalytics.reference.ticker_feed_config
+SET batch_group = 'B', updated_at = current_timestamp()
+WHERE instrument_id = 777;
+
+-- Change fetch frequency
+UPDATE tradeanalytics.reference.ticker_feed_config
+SET run_frequency = 'weekly', updated_at = current_timestamp()
+WHERE instrument_id = 777;
+
+-- Rename a symbol correctly (SCD-2: close old, open new — conId unchanged!)
+UPDATE tradeanalytics.reference.instrument_listing
+SET is_current = false, valid_to = current_date(), change_reason = 'RENAME'
+WHERE symbol = 'FB' AND is_current = true;
+INSERT INTO tradeanalytics.reference.instrument_listing
+  (instrument_id, symbol, company_name, exchange, exchange_mic, currency,
+   valid_from, is_current, created_at)
+VALUES (<same_instrument_id>, 'META', 'Meta Platforms', 'SMART', 'XNAS', 'USD',
+        current_date(), true, current_timestamp());
+--   Fetching is UNAFFECTED by renames — the agent fetches by conId, not symbol.
+```
+
+### 15.7 Instrument-config change → propagation flow
+
+```
+Operator SQL on reference tables (desired state)
+        │  (no deploy, no restart — just data)
+        ▼
+Next fetch_planner run  ── compares desired vs actual watermark
+        │   is_active=false → instrument skipped
+        │   new instrument (no watermark) → INITIAL_LOAD
+        │   target_start_date earlier → HISTORY_EXTENSION
+        │   watermark behind today → INCREMENTAL
+        ▼
+control.fetch_request rows (PENDING) + S3 manifests
+        ▼
+EC2 agent fetches by conId → raw payloads
+        ▼
+raw_to_bronze → bronze.market_data_daily + watermark advances + job_run_log
+```
+**Golden rule:** you change **desired state** (reference tables) via single SQL;
+the planner turns that into work automatically on its next run. You never touch
+`control.fetch_request` or the watermark by hand — those are system-managed.
+
+### 15.8 Instrument-management troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| New instrument never fetched | Missing feed_config row OR is_active=false | §15.4 STEP 4; check §15.2 query |
+| New instrument in `skipped_unmapped` | conId not seeded | Run §7 seeding (STEP 5) |
+| History extension did nothing | `max_lookback_days` clamping, or IBKR has no older data | Raise max_lookback_days (§15.5); check IBKR history availability |
+| Deactivated instrument still fetched | Planner ran before the UPDATE committed | Re-run planner after confirming `is_active=false` |
+| Two current listings for one instrument | universe_sync SCD-2 defect (see id 45) | Close the wrong listing (SCD-2 UPDATE); do NOT delete |
+| INSERT fails on unknown column | DDL drift between the two 01_*.py notebooks | `DESCRIBE TABLE` the live table; use its actual columns |
 </content>
