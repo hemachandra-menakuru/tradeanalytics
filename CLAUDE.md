@@ -104,6 +104,14 @@ Adding a new component = implement ABC + register (one line) + update YAML. Zero
 
 ---
 
+## 3.5 Ingestion Backlog / Enhancements (deferred, not blocking)
+
+| # | Enhancement | Where | Why / trigger |
+|---|---|---|---|
+| ENH-1 | **Batch/set-based raw_to_bronze** — replace the per-receipt Python loop with set-based ops (process all of an instrument's / the whole batch's receipts in one pass) | `src/bronze/jobs/raw_to_bronze_job.py` — `ingest()` currently loops row-by-row over LANDED requests, firing ~7 SQL statements each (560 receipts → hundreds of statements, ~788 Spark tasks). Group by instrument or read all payloads into one DataFrame → single validate + single BronzeWriter append + one watermark/job_run_log batch. | Correct + idempotent today, just chatty. Fine at 35 instruments; revisit before 100s of instruments or intraday volume. Skill: `tradeanalytics-spark-optimization`. |
+| ENH-2 | **Reference-DDL drift cleanup** — two notebooks (`01_create_reference_tables.py`, `01_create_schemas_and_tables.py`) define some tables with divergent columns (same class as the job_run_log drift already fixed). Pick one canonical DDL notebook per table; delete/redirect the duplicate. | `notebooks/reference/01_*.py`. Verify each live table with DESCRIBE, keep the notebook that matches, remove the other's duplicate CREATE. | Bit us on job_run_log; will bite again on any INSERT built from the wrong notebook. Do alongside the instrument-45 surgery. |
+| ENH-3 | **instrument_id 45 reference surgery** — 3 current listings (BF.B/BRK.B/dead placeholder) on one instrument; 2 current ibkr conids. | See §10 Known Issues for the full fix (new instrument rows + repoint + universe_sync uniqueness validation). | Contained, not in active universe. |
+
 ## 4. File Structure
 
 Restructured on `feature/phase3-restructure` (2026-06-25). Old `src/ingestion/` and `src/config/` folders removed.
