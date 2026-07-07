@@ -599,4 +599,143 @@ the planner turns that into work automatically on its next run. You never touch
 | Deactivated instrument still fetched | Planner ran before the UPDATE committed | Re-run planner after confirming `is_active=false` |
 | Two current listings for one instrument | universe_sync SCD-2 defect (see id 45) | Close the wrong listing (SCD-2 UPDATE); do NOT delete |
 | INSERT fails on unknown column | DDL drift between the two 01_*.py notebooks | `DESCRIBE TABLE` the live table; use its actual columns |
+
+### 15.9 Bulk-activate EXISTING instruments (INSERT … SELECT)
+
+**Key insight:** the reference tables already hold ~500 instruments
+(`instrument`, `instrument_listing`, `instrument_vendor_id` all populated), but
+only a handful are in `ticker_feed_config`. An instrument that already exists and
+is conId-mapped becomes fetchable by adding **only** a feed_config row — no need
+to re-insert instrument/listing/vendor rows (§15.4 steps 1–3, 5 are for genuinely
+NEW instruments not yet in the tables). This can be one bulk `INSERT … SELECT`
+that resolves `instrument_id` automatically by joining on symbol.
+
+**Always PREVIEW first** (count + which symbols would activate):
+```sql
+SELECT COUNT(*) AS would_activate,
+       array_join(sort_array(collect_list(l.symbol)), ', ') AS symbols
+FROM tradeanalytics.reference.instrument_listing l
+JOIN tradeanalytics.reference.instrument_vendor_id v
+     ON v.instrument_id = l.instrument_id AND v.vendor='ibkr' AND v.is_current=true
+WHERE l.is_current = true
+  AND l.symbol IN ('AAPL','MSFT','SPY','QQQ',  /* … your list … */ )
+  AND NOT EXISTS (SELECT 1 FROM tradeanalytics.reference.ticker_feed_config fc
+                  WHERE fc.instrument_id = l.instrument_id AND fc.stream='daily')
+  AND l.instrument_id NOT IN (        -- exclude multi-listing pollution (e.g. id 45)
+      SELECT instrument_id FROM tradeanalytics.reference.instrument_listing
+      WHERE is_current=true GROUP BY instrument_id HAVING COUNT(*)>1);
+```
+A symbol MISSING from the preview means it either isn't in `instrument_listing`
+(truly new → full §15.4) or has no conId (→ §7 seeding).
+
+**The bulk INSERT** (idempotent, safe — three guards built in):
+```sql
+INSERT INTO tradeanalytics.reference.ticker_feed_config
+  (instrument_id, stream, target_start_date, run_frequency, batch_group,
+   priority, is_active, max_lookback_days, created_at, updated_at, created_by)
+SELECT l.instrument_id, 'daily', DATE'2016-01-01', 'daily',
+       'B',                       -- test batch_group, separate from prod 'A'
+       5, true, 3650,
+       current_timestamp(), current_timestamp(), 'ops-bulk-testing'
+FROM tradeanalytics.reference.instrument_listing l
+JOIN tradeanalytics.reference.instrument_vendor_id v        -- guard 1: must have conId
+     ON v.instrument_id = l.instrument_id AND v.vendor='ibkr' AND v.is_current=true
+WHERE l.is_current = true
+  AND l.symbol IN ('AAPL','MSFT','SPY','QQQ',  /* … your list … */ )
+  AND NOT EXISTS (                                          -- guard 2: no duplicates
+      SELECT 1 FROM tradeanalytics.reference.ticker_feed_config fc
+      WHERE fc.instrument_id = l.instrument_id AND fc.stream='daily')
+  AND l.instrument_id NOT IN (                              -- guard 3: skip pollution
+      SELECT instrument_id FROM tradeanalytics.reference.instrument_listing
+      WHERE is_current=true GROUP BY instrument_id HAVING COUNT(*)>1);
+```
+Guards: (1) conId JOIN → nothing lands in `skipped_unmapped`; (2) `NOT EXISTS`
+→ re-runnable, never duplicates; (3) multi-listing exclusion → the id-45 defect
+can't sneak in. **After INSERT:** run planner (blank symbols) → all become
+INITIAL_LOAD. Using `batch_group='B'` lets you later pause/stage the whole test
+set with one `WHERE batch_group='B'`.
+
+**Bulk deactivate the test set when done:**
+```sql
+UPDATE tradeanalytics.reference.ticker_feed_config
+SET is_active = false, updated_at = current_timestamp()
+WHERE batch_group = 'B';
+```
+
+### 15.10 Handy operational queries (health, coverage, discovery)
+
+```sql
+-- A. Coverage dashboard: mapped vs active vs actually-ingested, per instrument
+SELECT l.symbol,
+       (v.vendor_instrument_id IS NOT NULL)                         AS has_conid,
+       COALESCE(fc.is_active, false)                                AS is_active,
+       w.earliest_date, w.latest_date, w.record_count,
+       datediff(current_date(), w.latest_date)                      AS days_stale
+FROM tradeanalytics.reference.instrument_listing l
+LEFT JOIN tradeanalytics.reference.instrument_vendor_id v
+       ON v.instrument_id=l.instrument_id AND v.vendor='ibkr' AND v.is_current=true
+LEFT JOIN tradeanalytics.reference.ticker_feed_config fc
+       ON fc.instrument_id=l.instrument_id AND fc.stream='daily'
+LEFT JOIN tradeanalytics.control.ingestion_watermark w
+       ON w.instrument_id=l.instrument_id AND w.stream='daily'
+WHERE l.is_current=true
+ORDER BY is_active DESC, days_stale DESC NULLS LAST;
+
+-- B. Active instruments with NO data yet (planned but never successfully ingested)
+SELECT l.symbol, fc.target_start_date
+FROM tradeanalytics.reference.ticker_feed_config fc
+JOIN tradeanalytics.reference.instrument_listing l
+     ON l.instrument_id=fc.instrument_id AND l.is_current=true
+LEFT JOIN tradeanalytics.control.ingestion_watermark w
+     ON w.instrument_id=fc.instrument_id AND w.stream='daily'
+WHERE fc.is_active=true AND w.instrument_id IS NULL;
+
+-- C. Active instruments MISSING a conId (would be blocked by require_vendor_id)
+SELECT l.symbol
+FROM tradeanalytics.reference.ticker_feed_config fc
+JOIN tradeanalytics.reference.instrument_listing l
+     ON l.instrument_id=fc.instrument_id AND l.is_current=true
+LEFT JOIN tradeanalytics.reference.instrument_vendor_id v
+     ON v.instrument_id=fc.instrument_id AND v.vendor='ibkr' AND v.is_current=true
+WHERE fc.is_active=true AND v.vendor_instrument_id IS NULL;
+
+-- D. Stale active instruments (ingested, but latest_date behind — needs a run)
+SELECT l.symbol, w.latest_date, datediff(current_date(), w.latest_date) AS days_behind
+FROM tradeanalytics.control.ingestion_watermark w
+JOIN tradeanalytics.reference.instrument_listing l
+     ON l.instrument_id=w.instrument_id AND l.is_current=true
+JOIN tradeanalytics.reference.ticker_feed_config fc
+     ON fc.instrument_id=w.instrument_id AND fc.is_active=true
+WHERE datediff(current_date(), w.latest_date) > 3
+ORDER BY days_behind DESC;
+
+-- E. Bronze bar counts per active instrument (data volume overview)
+SELECT b.symbol, COUNT(*) AS bars, MIN(b.bar_date) AS earliest, MAX(b.bar_date) AS latest
+FROM tradeanalytics.bronze.market_data_daily b
+GROUP BY b.symbol ORDER BY bars DESC;
+
+-- F. Last run outcome per instrument (from the audit log)
+SELECT l.symbol, j.job_type, j.records_new, j.status, j.run_started_at
+FROM tradeanalytics.control.job_run_log j
+JOIN tradeanalytics.reference.instrument_listing l
+     ON l.instrument_id=j.instrument_id AND l.is_current=true
+QUALIFY ROW_NUMBER() OVER (PARTITION BY j.instrument_id ORDER BY j.run_started_at DESC)=1
+ORDER BY j.run_started_at DESC;
+
+-- G. Reference-data integrity check (should return ZERO rows; >0 = pollution)
+SELECT instrument_id, COUNT(*) AS current_listings
+FROM tradeanalytics.reference.instrument_listing WHERE is_current=true
+GROUP BY instrument_id HAVING COUNT(*)>1;
+
+-- H. Batch-group roster (what runs together)
+SELECT batch_group, COUNT(*) AS instruments,
+       SUM(CASE WHEN is_active THEN 1 ELSE 0 END) AS active
+FROM tradeanalytics.reference.ticker_feed_config GROUP BY batch_group ORDER BY batch_group;
+```
+
+**When to reach for which:**
+- Onboarding a test set → **§15.9 preview + INSERT**, then **query B** (confirm they're queued), then **query C** (catch any unmapped before running the planner).
+- Daily "is everything current?" → **query D** (stale) + **query F** (last outcome).
+- After a big backfill → **query E** (volumes) + **query A** (full coverage).
+- Suspect reference pollution → **query G** (must be empty).
 </content>
