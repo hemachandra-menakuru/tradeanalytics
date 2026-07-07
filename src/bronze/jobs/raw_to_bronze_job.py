@@ -152,6 +152,17 @@ class RawToBronzeJob:
     # ── phase ② + ③ ingest & bookkeep ─────────────────────────────────────────
 
     def ingest(self, dry_run: bool = False) -> dict:
+        """
+        Ingest all LANDED receipts, GROUPED BY instrument (ENH-1).
+
+        Prior design looped per-receipt: each chunk did its own validate +
+        write_batch, and write_batch's dedup joins against the FULL Bronze
+        table. 560 receipts × full-table scan on a table that grows during the
+        run = O(N^2) — a 35-instrument/15yr backfill took hours. Grouping all
+        of an instrument's ~16 chunks into ONE validate + ONE write collapses
+        that to ONE dedup scan per instrument (35, not 560). Idempotent as
+        before: only LANDED rows are processed; a re-run skips INGESTED.
+        """
         rows = self._spark.sql(f"""
             SELECT request_key, batch_id, instrument_id, symbol, vendor,
                    bar_interval, load_type, s3_data_path, record_count
@@ -165,60 +176,62 @@ class RawToBronzeJob:
             logger.info("ingest: nothing LANDED to ingest")
             return {"requests_ingested": 0, "records_written": 0, "records_rejected": 0}
 
+        # Group receipts by instrument (symbol + interval share instrument_id/vendor)
+        groups: dict = {}
+        for r in rows:
+            groups.setdefault((r.instrument_id, r.symbol, r.bar_interval), []).append(r)
+
         total_written = total_rejected = ingested = 0
 
-        for r in rows:
+        for (instrument_id, symbol, interval), grp in groups.items():
             started = datetime.now(timezone.utc)
-            payload = json.loads(self._fs_head(r.s3_data_path))
-            records = payload_to_records(payload)
+            rep = grp[0]   # representative for batch_id / load_type
 
-            if len(records) != r.record_count:
-                logger.warning(
-                    f"[{r.request_key}] payload has {len(records)} bars but receipt "
-                    f"said {r.record_count} — proceeding with payload contents"
-                )
+            # Concatenate ALL chunk payloads for this instrument into one record set
+            records: List[dict] = []
+            for r in grp:
+                payload = json.loads(self._fs_head(r.s3_data_path))
+                records.extend(payload_to_records(payload))
 
             if dry_run:
-                logger.info(f"[{r.request_key}] DRY RUN — would ingest {len(records)} records")
+                logger.info(f"[{symbol}] DRY RUN — would ingest {len(records)} records "
+                            f"from {len(grp)} chunk(s)")
                 continue
 
-            ingestion_type = "backfill" if r.load_type in (
+            ingestion_type = "backfill" if rep.load_type in (
                 "INITIAL_LOAD", "HISTORY_EXTENSION", "FORCE_RELOAD") else "scheduled"
 
-            vs = self._validator.validate_batch(
-                symbol=r.symbol,
-                interval=r.bar_interval,
-                batch_id=r.batch_id,
+            vs = self._validator.validate_batch(          # ONE validate for the instrument
+                symbol=symbol, interval=interval, batch_id=rep.batch_id,
                 raw_records=records,
                 pipeline_version=self._pipeline_version,
                 ingestion_type=ingestion_type,
-                instrument_id=r.instrument_id,
-                ingested_by=payload.get("fetched_by", f"fetch_agent_{self._vendor}"),
+                instrument_id=instrument_id,
+                ingested_by=f"fetch_agent_{self._vendor}",
             )
-            wr = self._writer.write_batch(
-                symbol=r.symbol,
-                interval=r.bar_interval,
-                batch_id=r.batch_id,
+            wr = self._writer.write_batch(                 # ONE dedup scan + append
+                symbol=symbol, interval=interval, batch_id=rep.batch_id,
                 clean_records=vs.writable_records,
                 rejected_records=vs.rejected_records,
                 main_table=self._stream_cfg.table,
                 rejected_table=self._stream_cfg.rejected_table,
             )
 
-            self._update_watermark(r, vs)
-            self._mark_ingested(r.request_key)
-            self._write_job_run_log(r, vs, wr, started)
+            self._update_watermark(rep, vs)               # ONE watermark (min/max over all)
+            self._mark_ingested([r.request_key for r in grp])   # mark ALL chunks INGESTED
+            self._write_job_run_log(rep, vs, wr, started) # ONE audit row per instrument
 
             total_written  += wr.records_written + wr.records_amended
             total_rejected += wr.rejected_written
-            ingested       += 1
+            ingested       += len(grp)
             logger.info(
-                f"[{r.request_key}] INGESTED — {wr.records_written} new, "
+                f"[{symbol}] INGESTED {len(grp)} chunk(s) — {wr.records_written} new, "
                 f"{wr.records_amended} amended, {wr.records_skipped} skipped, "
                 f"{wr.rejected_written} rejected"
             )
 
         summary = {"requests_ingested": ingested,
+                   "instruments": len(groups),
                    "records_written": total_written,
                    "records_rejected": total_rejected}
         logger.info(f"ingest complete: {summary}")
@@ -292,11 +305,14 @@ class RawToBronzeJob:
             mode=r.load_type.lower(), status="success", vendor=r.vendor,
         )
 
-    def _mark_ingested(self, request_key: str) -> None:
+    def _mark_ingested(self, request_keys) -> None:
+        if isinstance(request_keys, str):
+            request_keys = [request_keys]
+        keys_sql = ", ".join(f"'{k}'" for k in request_keys)
         self._spark.sql(f"""
             UPDATE {self._catalog}.control.fetch_request
             SET status = 'INGESTED', ingested_at = current_timestamp()
-            WHERE request_key = '{request_key}' AND status = 'LANDED'
+            WHERE request_key IN ({keys_sql}) AND status = 'LANDED'
         """)
 
     def _write_job_run_log(self, r, vs, wr, started) -> None:
