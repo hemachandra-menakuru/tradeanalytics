@@ -399,20 +399,34 @@ control.ingestion_watermark (instrument_id=505, latest_date=2026-07-02) ── a
         planner compares desired vs actual → control.fetch_request (work)
 ```
 
+### 15.1a Readable views (use these for queries)
+
+Base tables key on `instrument_id` (no stored `symbol` — symbols change, e.g.
+FB→META, and live only in `instrument_listing`, SCD-2). For readable queries,
+use the `v_*` views (created by `notebooks/reference/07_create_readable_views.py`)
+— they join the CURRENT symbol/company/conId live, so they can never go stale:
+
+| View | Over | Adds |
+|---|---|---|
+| `reference.v_ticker_feed_config` | ticker_feed_config | symbol, company_name, asset_class, ibkr_conid |
+| `control.v_ingestion_watermark` | ingestion_watermark | symbol, company_name |
+| `control.v_fetch_request` | fetch_request | symbol, company_name |
+| `control.v_job_run_log` | job_run_log | symbol |
+
+**Read via the views; WRITE to the base tables.** Never store symbol in these
+tables — that would denormalize a value that changes, creating update anomalies.
+
 ### 15.2 Which instruments are active — and how to check
 
 "Active for fetching" = a row in `ticker_feed_config` with `is_active = true`.
 (An instrument can exist and be mapped but NOT be fetched if inactive.)
 
 ```sql
--- Currently ACTIVE instruments (what the planner will fetch)
-SELECT fc.instrument_id, l.symbol, fc.stream, fc.target_start_date,
-       fc.batch_group, fc.priority, fc.is_active
-FROM tradeanalytics.reference.ticker_feed_config fc
-JOIN tradeanalytics.reference.instrument_listing l
-  ON l.instrument_id = fc.instrument_id AND l.is_current = true
-WHERE fc.is_active = true
-ORDER BY l.symbol;
+-- Currently ACTIVE instruments (what the planner will fetch) — via the readable view
+SELECT symbol, company_name, asset_class, batch_group, priority, target_start_date
+FROM tradeanalytics.reference.v_ticker_feed_config
+WHERE is_active = true
+ORDER BY symbol;
 ```
 ```sql
 -- Full picture: config vs mapping vs actual watermark (one row per instrument)
