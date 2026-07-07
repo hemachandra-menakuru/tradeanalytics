@@ -723,6 +723,18 @@ JOIN tradeanalytics.reference.ticker_feed_config fc
 WHERE datediff(current_date(), w.latest_date) > 3
 ORDER BY days_behind DESC;
 
+-- E0. Stage timings for a run (plan → fetch → ingest)
+--   planner duration (durable, from planner_run_log):
+SELECT batch_id, duration_seconds AS planner_secs, requests_emitted, run_started_at
+FROM tradeanalytics.control.planner_run_log ORDER BY run_started_at DESC LIMIT 5;
+--   agent drain (first→last landed; populated after raw_to_bronze reconciles):
+SELECT timestampdiff(MINUTE, MIN(landed_at), MAX(landed_at)) AS agent_minutes
+FROM tradeanalytics.control.fetch_request WHERE status IN ('LANDED','INGESTED');
+--   ingest duration (from job_run_log):
+SELECT MIN(run_started_at) AS ingest_start, MAX(run_completed_at) AS ingest_end,
+       SUM(duration_seconds) AS ingest_secs
+FROM tradeanalytics.control.job_run_log WHERE job_type='raw_to_bronze';
+
 -- E. Bronze bar counts per active instrument (data volume overview)
 SELECT b.symbol, COUNT(*) AS bars, MIN(b.bar_date) AS earliest, MAX(b.bar_date) AS latest
 FROM tradeanalytics.bronze.market_data_daily b

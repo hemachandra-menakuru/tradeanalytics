@@ -87,8 +87,9 @@ class FetchPlannerJob:
         dry_run: bool = False,
     ) -> dict:
         """Plan and emit fetch requests. Returns a summary dict."""
+        run_started = datetime.now(timezone.utc)
         today    = as_of_date or date.today()
-        batch_id = f"batch_{self._stream_name}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+        batch_id = f"batch_{self._stream_name}_{run_started.strftime('%Y%m%d_%H%M%S')}"
         interval = self._stream_cfg.intervals[0]
 
         orphans_repaired = self._repair_orphaned_requests()
@@ -170,8 +171,62 @@ class FetchPlannerJob:
             "orphans_repaired":  orphans_repaired,   # PENDING rows without manifests, marked ORPHANED
             "dry_run":           dry_run,
         }
+
+        # Durable run-timing record (closes the "planner has no measurable
+        # duration" gap — requested_at on fetch_request is a single-transaction
+        # timestamp, so it can't measure the planner). One row per run.
+        self._write_planner_run_log(summary, run_started)
+
         logger.info(f"FetchPlannerJob complete: {summary}")
         return summary
+
+    def _write_planner_run_log(self, summary: dict, run_started: datetime) -> None:
+        """Insert one job-level audit row. Creates the table if absent
+        (idempotent). Non-fatal — audit failure must never fail planning."""
+        import os
+        run_completed = datetime.now(timezone.utc)
+        dur_s = (run_completed - run_started).total_seconds()
+        tbl = f"{self._catalog}.control.planner_run_log"
+        try:
+            self._spark.sql(f"""
+                CREATE TABLE IF NOT EXISTS {tbl} (
+                    run_id                 BIGINT GENERATED ALWAYS AS IDENTITY,
+                    batch_id               STRING NOT NULL,
+                    stream                 STRING NOT NULL,
+                    vendor                 STRING NOT NULL,
+                    run_started_at         TIMESTAMP NOT NULL,
+                    run_completed_at       TIMESTAMP NOT NULL,
+                    duration_seconds       DOUBLE NOT NULL,
+                    instruments_evaluated  INT NOT NULL,
+                    requests_emitted       INT NOT NULL,
+                    skipped_noop           INT NOT NULL,
+                    skipped_inflight       INT NOT NULL,
+                    skipped_unmapped       INT NOT NULL,
+                    orphans_repaired       INT NOT NULL,
+                    dry_run                BOOLEAN NOT NULL,
+                    pipeline_version       STRING
+                ) USING DELTA
+                COMMENT 'Append-only audit of FetchPlannerJob runs — one row per run.'
+                TBLPROPERTIES ('delta.appendOnly'='true')
+            """)
+            self._spark.sql(f"""
+                INSERT INTO {tbl}
+                    (batch_id, stream, vendor, run_started_at, run_completed_at,
+                     duration_seconds, instruments_evaluated, requests_emitted,
+                     skipped_noop, skipped_inflight, skipped_unmapped,
+                     orphans_repaired, dry_run, pipeline_version)
+                VALUES
+                    ('{summary["batch_id"]}', '{self._stream_name}', '{self._vendor}',
+                     '{run_started.isoformat()}', '{run_completed.isoformat()}', {dur_s},
+                     {summary["instruments"]}, {summary["requests_emitted"]},
+                     {len(summary["skipped_noop"])}, {len(summary["skipped_inflight"])},
+                     {len(summary["skipped_unmapped"])}, {summary["orphans_repaired"]},
+                     {str(summary["dry_run"]).lower()},
+                     '{os.environ.get("PIPELINE_VERSION", "unknown")}')
+            """)
+            logger.info(f"planner_run_log: recorded run {summary['batch_id']} ({dur_s:.1f}s)")
+        except Exception as e:
+            logger.error(f"planner_run_log write failed (non-fatal): {e}")
 
     def _repair_orphaned_requests(self) -> int:
         """
