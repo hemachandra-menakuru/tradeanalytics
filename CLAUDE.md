@@ -808,6 +808,23 @@ Feature store: `tradeanalytics.feature_store.*`
 4. State the immediate task
 5. **Next up: Phase 3 (Silver — feature engineering, step-by-step teaching)**
 
+## 13b. COST SAFETY (Databricks $ — real money, learned 2026-07-07)
+
+A ~77 DBU (~$68) single-day spike traced to running `raw_to_bronze` INTERACTIVELY
+("Run all" in the notebook) on Serverless All-Purpose compute. Two causes:
+(1) O(N²) ingest ran ~2h active (fixed by ENH-1); (2) the interactive serverless
+session stayed WARM and billing ~7h across re-runs + verification queries.
+Interactive serverless has NO task timeout; a Job does (timeout_seconds).
+
+**Rules (enforced + documented):**
+- Run ingestion as the deployed JOB (`databricks bundle run raw_to_bronze` /
+  Workflows → Run now), NEVER interactive "Run all". Jobs auto-terminate + honour
+  the 3600s timeout. Interactive sessions stay warm and bill until detached.
+- `raw_to_bronze` notebook has an `execute` gate (default false) — interactive
+  "Run all" exits without running the heavy job; the Job sets execute=true.
+- Detach/terminate serverless sessions after ad-hoc SQL. Full detail:
+  docs/runbooks/ingestion_run_guide.md §1b.
+
 ## 14. Ops Runbook — Known Gotchas
 
 ## Infrastructure Decision: Serverless-Only, No Always-On AWS Compute

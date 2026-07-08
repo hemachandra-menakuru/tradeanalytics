@@ -80,6 +80,7 @@ resources:
             base_parameters:
               dry_run:          "false"
               vendor:           "ibkr"
+              execute:          "true"     # Job path runs; interactive "Run all" stays gated (execute=false)
               environment:      "${var.env}"
               pipeline_version: "${var.pipeline_version}"
           environment_key: serverless_env

@@ -27,9 +27,17 @@ if IS_DATABRICKS:
     dbutils.widgets.text("vendor",           "ibkr",  "Vendor queue")
     dbutils.widgets.text("environment",      "dev",   "Deployment environment")
     dbutils.widgets.text("pipeline_version", "",      "Pipeline version (git SHA)")
+    # COST GATE: heavy ingestion runs only when execute=true. The deployed Job
+    # sets this in databricks.yml base_parameters. Interactive "Run all" leaves
+    # it false → the expensive job.run() is SKIPPED. This exists because a manual
+    # interactive run on 2026-07-07 ran for hours (O(N^2), since fixed) on a warm
+    # serverless session and billed ~77 DBU. Prefer the JOB; it auto-terminates
+    # and enforces the 3600s timeout that interactive sessions do NOT have.
+    dbutils.widgets.text("execute",          "false", "Execute ingestion (true=run heavy job)")
 
     dry_run = dbutils.widgets.get("dry_run").strip().lower() == "true"
     vendor  = dbutils.widgets.get("vendor").strip() or "ibkr"
+    execute = dbutils.widgets.get("execute").strip().lower() == "true"
     os.environ.setdefault("ENVIRONMENT", dbutils.widgets.get("environment").strip() or "dev")
     pv = dbutils.widgets.get("pipeline_version").strip()
     if pv:
@@ -37,6 +45,7 @@ if IS_DATABRICKS:
 else:
     dry_run = os.environ.get("INGEST_DRY_RUN", "false").lower() == "true"
     vendor  = os.environ.get("INGEST_VENDOR", "ibkr")
+    execute = os.environ.get("INGEST_EXECUTE", "false").lower() == "true"
 
 # COMMAND ----------
 from src.shared.config.config_loader import ConfigLoader
@@ -56,6 +65,23 @@ _fs_rm   = dbutils.fs.rm
 
 # COMMAND ----------
 from src.bronze.jobs.raw_to_bronze_job import RawToBronzeJob
+
+if not execute:
+    msg = (
+        "\n" + "=" * 68 +
+        "\n  COST GATE: ingestion NOT executed (execute=false).\n"
+        "  This is the safe default so an accidental interactive 'Run all'\n"
+        "  never starts a long, billable serverless session.\n\n"
+        "  To actually ingest:\n"
+        "   • RECOMMENDED — run the deployed Job (auto-terminates, 1h timeout):\n"
+        "       databricks bundle run raw_to_bronze\n"
+        "       or  Workflows -> [dev] Raw to Bronze Ingestion -> Run now\n"
+        "   • Interactive (only for debugging): set the 'execute' widget to true,\n"
+        "     and DETACH the serverless session when done.\n" +
+        "=" * 68
+    )
+    print(msg)
+    dbutils.notebook.exit("skipped: execute=false (cost gate)")
 
 job = RawToBronzeJob(
     config=config, spark=spark,

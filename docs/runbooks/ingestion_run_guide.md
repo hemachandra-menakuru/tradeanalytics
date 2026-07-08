@@ -37,6 +37,33 @@ the EC2 agent only ever connects outward (to localhost gateway + S3).
 
 ---
 
+## 1b. Cost safety (READ THIS — real money)
+
+Databricks Serverless bills **DBUs while a compute session is active/warm**.
+Two rules keep the bill small; ignoring them cost ~77 DBU (~$68) on 2026-07-07.
+
+1. **Run ingestion as the deployed JOB, never interactively.**
+   - ✅ `databricks bundle run raw_to_bronze`  (or Workflows → Run now)
+   - ❌ opening the notebook and hitting "Run all"
+   - Why: a **Job** spins up serverless, runs, and **auto-terminates** — you pay
+     only for the run, and the `timeout_seconds: 3600` cap kills any runaway at
+     1 hour. **Interactive** serverless has NO task timeout and the session stays
+     **warm and billing** as long as you keep issuing cells/queries. On 2026-07-07
+     an interactive run stayed warm ~7 hours across re-runs + verification queries.
+   - Safeguard in place: `raw_to_bronze` notebook has an `execute` gate (default
+     false). Interactive "Run all" prints instructions and **exits without running
+     the heavy job**. The Job sets `execute=true` automatically.
+
+2. **Detach/terminate the serverless session when you finish poking around.**
+   - After ad-hoc SQL / verification queries in a notebook, terminate the session:
+     compute dropdown (top-right) → Terminate/Detach. A warm idle session still bills.
+   - Serverless idle auto-termination exists but resets every time you run a cell —
+     so a morning of running queries every few minutes = a session warm all morning.
+
+3. **Watch usage:** Account console → Usage. If a single notebook shows many
+   consecutive 10-minute intervals at a steady DBU rate, that's a warm interactive
+   session — terminate it.
+
 ## 2. Prerequisites & access
 
 | Need | Detail |
