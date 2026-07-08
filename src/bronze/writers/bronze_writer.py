@@ -142,6 +142,7 @@ class BronzeWriter:
         rejected_records: List[dict],
         main_table: str,
         rejected_table: str,
+        skip_dedup: bool = False,
     ) -> BronzeWriteResult:
         """
         Write validated records to Bronze tables.
@@ -157,6 +158,13 @@ class BronzeWriter:
             rejected_records: Rejected records → rejected table
             main_table:       Resolved Bronze table name (e.g. "market_data_daily")
             rejected_table:   Resolved rejected table name
+            skip_dedup:       Bypass the Layer-2 full-table dedup scan. Set True
+                              ONLY when the incoming dates cannot overlap existing
+                              Bronze data (INITIAL_LOAD / HISTORY_EXTENSION) — the
+                              scan would classify everything as "new" anyway, at
+                              full-table-scan cost. Correctness is unaffected:
+                              Layer 3 (Silver ROW_NUMBER window) is the backstop.
+                              See docs/design/bronze_dedup_correctness_vs_cost.md.
 
         Returns:
             BronzeWriteResult with counts and timing
@@ -164,10 +172,19 @@ class BronzeWriter:
         import time
         start_ms = time.time()
 
-        # Layer 2 deduplication — bulk classify (ONE query total)
-        new_records, amended, skipped_count = self._bulk_classify(
-            clean_records, main_table
-        )
+        if skip_dedup:
+            # No existing rows can match these keys → all records are new.
+            # Avoids the O(N²) full-table scan on backfills.
+            new_records, amended, skipped_count = clean_records, [], 0
+            logger.info(
+                f"[{symbol}/{interval}] skip_dedup — {len(clean_records)} records "
+                f"appended without dedup scan (no possible overlap)"
+            )
+        else:
+            # Layer 2 deduplication — bulk classify (ONE query total)
+            new_records, amended, skipped_count = self._bulk_classify(
+                clean_records, main_table
+            )
 
         # Write new records
         if new_records:

@@ -201,6 +201,12 @@ class RawToBronzeJob:
             ingestion_type = "backfill" if rep.load_type in (
                 "INITIAL_LOAD", "HISTORY_EXTENSION", "FORCE_RELOAD") else "scheduled"
 
+            # Skip the Layer-2 full-table dedup scan when the incoming dates
+            # cannot overlap existing Bronze (INITIAL_LOAD / HISTORY_EXTENSION).
+            # FORCE_RELOAD deliberately overlaps → keep dedup (version increment).
+            # Correctness backstop is always Layer 3 (Silver window).
+            skip_dedup = rep.load_type in ("INITIAL_LOAD", "HISTORY_EXTENSION")
+
             vs = self._validator.validate_batch(          # ONE validate for the instrument
                 symbol=symbol, interval=interval, batch_id=rep.batch_id,
                 raw_records=records,
@@ -209,12 +215,13 @@ class RawToBronzeJob:
                 instrument_id=instrument_id,
                 ingested_by=f"fetch_agent_{self._vendor}",
             )
-            wr = self._writer.write_batch(                 # ONE dedup scan + append
+            wr = self._writer.write_batch(                 # dedup skipped for backfills
                 symbol=symbol, interval=interval, batch_id=rep.batch_id,
                 clean_records=vs.writable_records,
                 rejected_records=vs.rejected_records,
                 main_table=self._stream_cfg.table,
                 rejected_table=self._stream_cfg.rejected_table,
+                skip_dedup=skip_dedup,
             )
 
             self._update_watermark(rep, vs)               # ONE watermark (min/max over all)
