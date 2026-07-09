@@ -34,6 +34,7 @@ class FetchRequestRepository:
         catalog: str,
         raw_bucket: str,
         fs_put: Callable[[str, str, bool], None],
+        manifest_workers: int = 16,
     ):
         """
         Args:
@@ -41,11 +42,14 @@ class FetchRequestRepository:
             catalog:    Unity Catalog name (e.g. "tradeanalytics")
             raw_bucket: raw landing bucket (e.g. "handh-trade-raw-use1")
             fs_put:     callable(path, contents, overwrite) — dbutils.fs.put
+            manifest_workers: thread-pool size for concurrent manifest writes
+                              (I/O-bound S3 puts; 16 is a safe default)
         """
         self._spark      = spark
         self._table      = f"{catalog}.control.fetch_request"
         self._raw_bucket = raw_bucket
         self._fs_put     = fs_put
+        self._manifest_workers = manifest_workers
 
     def pending_prefix(self, vendor: str) -> str:
         # Vendor-scoped queues: each vendor's agent polls only its own inbox
@@ -53,18 +57,52 @@ class FetchRequestRepository:
         return f"s3://{self._raw_bucket}/control/fetch/{vendor}/pending"
 
     def save_all(self, requests: List[FetchRequest]) -> int:
-        """Insert Delta rows, then write one manifest per request. Returns count."""
+        """Insert Delta rows, then write one manifest per request. Returns count.
+
+        Manifest writes are I/O-bound (one S3 put each) and independent, so they
+        run in a thread pool — sequential writes dominated planner runtime
+        (~110s for 435 manifests → hours at 2k tickers). Parallelising cuts that
+        to roughly runtime/threads. Delta insert stays a single transaction
+        first, so a manifest-write failure leaves a PENDING row the planner's
+        orphan-repair heals on the next run.
+        """
         if not requests:
             return 0
 
         self._insert_rows(requests)
-        for req in requests:
-            self._write_manifest(req)
+        self._write_manifests_parallel(requests)
 
         logger.info(
             f"FetchRequestRepository: {len(requests)} requests saved to {self._table}"
         )
         return len(requests)
+
+    def _write_manifests_parallel(self, requests: List[FetchRequest]) -> None:
+        """Write all manifests concurrently (I/O-bound). Raises if any fail."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        if len(requests) == 1:
+            self._write_manifest(requests[0])
+            return
+
+        max_workers = min(self._manifest_workers, len(requests))
+        errors = []
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {
+                pool.submit(self._write_manifest, req): req.request_key
+                for req in requests
+            }
+            for fut in futures:
+                try:
+                    fut.result()
+                except Exception as e:
+                    errors.append(f"{futures[fut]}: {e}")
+
+        if errors:
+            raise RuntimeError(
+                f"{len(errors)}/{len(requests)} manifest writes failed: "
+                f"{errors[:3]}{'…' if len(errors) > 3 else ''}"
+            )
 
     # ── internals ─────────────────────────────────────────────────────────────
 
