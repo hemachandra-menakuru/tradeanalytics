@@ -14,10 +14,17 @@ Phases per run:
                fetch_request → INGESTED · control.job_run_log row (per request)
   ④ ARCHIVE    done/ receipts → done/archive/<ingest-date>/
 
-Idempotency: re-running reconcile re-applies the same statuses; INGESTED
-requests are never re-ingested; if a crash happens after Bronze write but
-before status update, the re-run's Bronze write dedups to zero new rows and
-the status update completes (at-least-once + idempotent, end to end).
+Idempotency (rewritten 2026-07-10 — three hard guarantees):
+  • RECONCILE is set-based (ONE MERGE, not one UPDATE per receipt) and only
+    transitions PENDING rows, so re-running never regresses LANDED/INGESTED and
+    a stale failed/ receipt can never overwrite a good LANDED (success wins).
+  • INGEST guards the skip_dedup backfill path: before re-appending, it checks
+    whether this (symbol, batch_id) is already in Bronze. On a crash-then-rerun
+    this prevents duplicate rows — the gap the earlier skip_dedup optimisation
+    silently opened (a bypassed Layer-2 scan cannot dedup a replay).
+  • FAULT ISOLATION: each instrument group is wrapped in try/except. A poison
+    payload marks nothing FAILED — it is left LANDED so the next run retries and
+    the monitor flags it if it stays stuck; the other 34 instruments still load.
 
 All I/O is S3 (via injected fs helpers) + Delta — serverless-safe, no egress.
 The transform (payload → records) is a pure function, unit-tested separately.
@@ -101,6 +108,7 @@ class RawToBronzeJob:
         self._fs_ls, self._fs_head, self._fs_put, self._fs_rm = fs_ls, fs_head, fs_put, fs_rm
 
         schema = config.databricks.schemas.bronze
+        self._bronze_schema = schema   # needed for the skip_dedup idempotency guard
         self._validator  = DataQualityValidator.for_stream(config, stream_name)
         self._writer     = BronzeWriter(mode="spark", spark=spark,
                                         catalog=self._catalog, schema=schema)
@@ -116,38 +124,98 @@ class RawToBronzeJob:
     # ── phase ① reconcile ─────────────────────────────────────────────────────
 
     def reconcile(self) -> dict:
-        """Apply agent receipts (done/ + failed/) to control.fetch_request."""
-        landed = failed = 0
+        """Apply agent receipts (done/ + failed/) to control.fetch_request in ONE MERGE.
+
+        Was: one Delta UPDATE per receipt (435 sequential file-rewrites — the
+        phase that stalled the run). Now: read all receipts, resolve each
+        request_key to a single target status (LANDED wins over FAILED so a
+        stale failed/ receipt can never clobber a good landing), then one
+        set-based MERGE. Values flow through a typed DataFrame, not f-strings,
+        so paths/timestamps/messages can't break or inject SQL. The MERGE only
+        touches status='PENDING' rows, so it is idempotent on re-run and never
+        regresses LANDED/INGESTED.
+        """
+        # request_key → (new_status, s3_data_path, record_count, landed_at, error, attempt)
+        actions: dict = {}
+
+        # FAILED first, then LANDED overlays it — done/ (success) wins on conflict.
+        for m in self._list_receipts(self._failed_prefix):
+            if m.get("task_type") != "FETCH_OHLCV":
+                continue
+            key = m.get("request_key")
+            if not key:
+                continue
+            err = (m.get("error_message") or "unknown")[:500]
+            actions[key] = ("FAILED", None, None, None, err, int(m.get("attempt_count", 1)))
 
         for m in self._list_receipts(self._done_prefix):
             if m.get("task_type") != "FETCH_OHLCV":
                 continue   # e.g. QUALIFY receipts — different flow, leave in place
-            n = self._spark.sql(f"""
-                UPDATE {self._catalog}.control.fetch_request
-                SET status = 'LANDED',
-                    s3_data_path  = '{m["s3_data_path"]}',
-                    record_count  = {int(m.get("record_count", 0))},
-                    attempt_count = {int(m.get("attempt_count", 1))},
-                    landed_at     = '{m["landed_at"]}'
-                WHERE request_key = '{m["request_key"]}' AND status = 'PENDING'
-            """)
-            landed += 1
-
-        for m in self._list_receipts(self._failed_prefix):
-            if m.get("task_type") != "FETCH_OHLCV":
+            key = m.get("request_key")
+            s3  = m.get("s3_data_path")
+            if not key or not s3:
+                logger.error(f"reconcile: done receipt missing request_key/s3_data_path — skipped: {m.get('request_key')}")
                 continue
-            err = (m.get("error_message") or "unknown").replace("'", "''")[:500]
-            self._spark.sql(f"""
-                UPDATE {self._catalog}.control.fetch_request
-                SET status = 'FAILED',
-                    error_message = '{err}',
-                    attempt_count = {int(m.get("attempt_count", 1))}
-                WHERE request_key = '{m["request_key"]}' AND status IN ('PENDING','LANDED')
-            """)
-            failed += 1
+            actions[key] = (
+                "LANDED", s3, int(m.get("record_count", 0)),
+                m.get("landed_at"), None, int(m.get("attempt_count", 1)),
+            )
 
-        logger.info(f"reconcile: {landed} receipt(s) → LANDED, {failed} → FAILED")
-        return {"landed": landed, "failed": failed}
+        if not actions:
+            logger.info("reconcile: no receipts to apply")
+            return {"receipts_seen": 0, "requests_updated": 0}
+
+        updated = self._apply_reconcile(actions)
+        landed_n = sum(1 for v in actions.values() if v[0] == "LANDED")
+        failed_n = len(actions) - landed_n
+        logger.info(
+            f"reconcile: {len(actions)} receipt(s) resolved "
+            f"({landed_n} LANDED, {failed_n} FAILED) → {updated} PENDING row(s) transitioned"
+        )
+        return {"receipts_seen": len(actions), "requests_updated": updated,
+                "landed": landed_n, "failed": failed_n}
+
+    def _apply_reconcile(self, actions: dict) -> int:
+        """Build a typed source view from resolved receipt actions and MERGE once."""
+        from pyspark.sql.types import (
+            StructType, StructField, StringType, LongType,
+        )
+        schema = StructType([
+            StructField("request_key",   StringType(), False),
+            StructField("new_status",    StringType(), False),
+            StructField("s3_data_path",  StringType(), True),
+            StructField("record_count",  LongType(),   True),
+            StructField("landed_at",     StringType(), True),   # ISO string → CAST in SQL
+            StructField("error_message", StringType(), True),
+            StructField("attempt_count", LongType(),   True),
+        ])
+        rows = [
+            (k, v[0], v[1], v[2], v[3], v[4], v[5])
+            for k, v in actions.items()
+        ]
+        df = self._spark.createDataFrame(rows, schema=schema)
+        df.createOrReplaceTempView("_reconcile_src")
+
+        result = self._spark.sql(f"""
+            MERGE INTO {self._catalog}.control.fetch_request AS t
+            USING _reconcile_src AS s
+            ON t.request_key = s.request_key
+            WHEN MATCHED AND t.status = 'PENDING' AND s.new_status = 'LANDED' THEN UPDATE SET
+                t.status        = 'LANDED',
+                t.s3_data_path  = s.s3_data_path,
+                t.record_count  = s.record_count,
+                t.attempt_count = s.attempt_count,
+                t.landed_at     = CAST(s.landed_at AS TIMESTAMP)
+            WHEN MATCHED AND t.status = 'PENDING' AND s.new_status = 'FAILED' THEN UPDATE SET
+                t.status        = 'FAILED',
+                t.error_message = s.error_message,
+                t.attempt_count = s.attempt_count
+        """)
+        # Delta returns operation metrics; fall back to -1 if unavailable.
+        try:
+            return int(result.first()["num_updated_rows"])
+        except Exception:
+            return -1
 
     # ── phase ② + ③ ingest & bookkeep ─────────────────────────────────────────
 
@@ -165,7 +233,8 @@ class RawToBronzeJob:
         """
         rows = self._spark.sql(f"""
             SELECT request_key, batch_id, instrument_id, symbol, vendor,
-                   bar_interval, load_type, s3_data_path, record_count
+                   bar_interval, load_type, s3_data_path, record_count,
+                   start_date, end_date
             FROM {self._catalog}.control.fetch_request
             WHERE stream = '{self._stream_name}' AND vendor = '{self._vendor}'
               AND status = 'LANDED' AND s3_data_path IS NOT NULL
@@ -174,86 +243,170 @@ class RawToBronzeJob:
 
         if not rows:
             logger.info("ingest: nothing LANDED to ingest")
-            return {"requests_ingested": 0, "records_written": 0, "records_rejected": 0}
+            return {"requests_ingested": 0, "instruments": 0, "records_written": 0,
+                    "records_rejected": 0, "groups_failed": 0, "batch_ids": []}
 
         # Group receipts by instrument (symbol + interval share instrument_id/vendor)
         groups: dict = {}
         for r in rows:
             groups.setdefault((r.instrument_id, r.symbol, r.bar_interval), []).append(r)
 
-        total_written = total_rejected = ingested = 0
+        total_written = total_rejected = ingested = groups_failed = 0
+        batch_ids: set = set()
 
         for (instrument_id, symbol, interval), grp in groups.items():
-            started = datetime.now(timezone.utc)
-            rep = grp[0]   # representative for batch_id / load_type
-
-            # Concatenate ALL chunk payloads for this instrument into one record set
-            records: List[dict] = []
-            for r in grp:
-                payload = json.loads(self._fs_head(r.s3_data_path))
-                records.extend(payload_to_records(payload))
-
-            if dry_run:
-                logger.info(f"[{symbol}] DRY RUN — would ingest {len(records)} records "
-                            f"from {len(grp)} chunk(s)")
+            # ── fault isolation: one poison instrument must not block the rest ──
+            try:
+                self._ingest_group(instrument_id, symbol, interval, grp, dry_run)
+            except Exception as e:
+                # Leave the group's requests LANDED (NOT marked FAILED): a re-run
+                # retries safely (the skip_dedup guard prevents duplicate appends),
+                # and the monitor alerts if they stay stuck. Terminal-failing a
+                # transient S3/validate blip would be worse than an auto-retry.
+                groups_failed += 1
+                logger.error(
+                    f"[{symbol}] ingest failed — left LANDED for retry: {e}",
+                    exc_info=True,
+                )
                 continue
 
-            ingestion_type = "backfill" if rep.load_type in (
-                "INITIAL_LOAD", "HISTORY_EXTENSION", "FORCE_RELOAD") else "scheduled"
-
-            # Skip the Layer-2 full-table dedup scan when the incoming dates
-            # cannot overlap existing Bronze (INITIAL_LOAD / HISTORY_EXTENSION).
-            # FORCE_RELOAD deliberately overlaps → keep dedup (version increment).
-            # Correctness backstop is always Layer 3 (Silver window).
-            skip_dedup = rep.load_type in ("INITIAL_LOAD", "HISTORY_EXTENSION")
-
-            vs = self._validator.validate_batch(          # ONE validate for the instrument
-                symbol=symbol, interval=interval, batch_id=rep.batch_id,
-                raw_records=records,
-                pipeline_version=self._pipeline_version,
-                ingestion_type=ingestion_type,
-                instrument_id=instrument_id,
-                ingested_by=f"fetch_agent_{self._vendor}",
-            )
-            wr = self._writer.write_batch(                 # dedup skipped for backfills
-                symbol=symbol, interval=interval, batch_id=rep.batch_id,
-                clean_records=vs.writable_records,
-                rejected_records=vs.rejected_records,
-                main_table=self._stream_cfg.table,
-                rejected_table=self._stream_cfg.rejected_table,
-                skip_dedup=skip_dedup,
-            )
-
-            self._update_watermark(rep, vs)               # ONE watermark (min/max over all)
-            self._mark_ingested([r.request_key for r in grp])   # mark ALL chunks INGESTED
-            self._write_job_run_log(rep, vs, wr, started) # ONE audit row per instrument
-
-            total_written  += wr.records_written + wr.records_amended
-            total_rejected += wr.rejected_written
-            ingested       += len(grp)
-            logger.info(
-                f"[{symbol}] INGESTED {len(grp)} chunk(s) — {wr.records_written} new, "
-                f"{wr.records_amended} amended, {wr.records_skipped} skipped, "
-                f"{wr.rejected_written} rejected"
-            )
+            rep = grp[0]
+            batch_ids.add(rep.batch_id)
+            res = self._last_group_result
+            total_written  += res["written"]
+            total_rejected += res["rejected"]
+            ingested       += len(grp) if not dry_run else 0
 
         summary = {"requests_ingested": ingested,
                    "instruments": len(groups),
                    "records_written": total_written,
-                   "records_rejected": total_rejected}
+                   "records_rejected": total_rejected,
+                   "groups_failed": groups_failed,
+                   "batch_ids": sorted(batch_ids)}
         logger.info(f"ingest complete: {summary}")
         return summary
 
+    def _ingest_group(self, instrument_id, symbol, interval, grp, dry_run) -> None:
+        """Ingest one instrument's chunks. Sets self._last_group_result for the caller.
+
+        Fault-isolated by the caller; each guard below is a distinct edge case
+        the earlier code did not handle (duplicate replay, zero-history loop)."""
+        self._last_group_result = {"written": 0, "rejected": 0}
+        started = datetime.now(timezone.utc)
+        rep = grp[0]   # representative for batch_id / load_type
+
+        # Concatenate ALL chunk payloads for this instrument into one record set
+        records: List[dict] = []
+        for r in grp:
+            payload = json.loads(self._fs_head(r.s3_data_path))
+            records.extend(payload_to_records(payload))
+
+        if dry_run:
+            logger.info(f"[{symbol}] DRY RUN — would ingest {len(records)} records "
+                        f"from {len(grp)} chunk(s)")
+            return
+
+        ingestion_type = "backfill" if rep.load_type in (
+            "INITIAL_LOAD", "HISTORY_EXTENSION", "FORCE_RELOAD") else "scheduled"
+
+        # Skip the Layer-2 full-table dedup scan when the incoming dates cannot
+        # overlap existing Bronze (INITIAL_LOAD / HISTORY_EXTENSION). FORCE_RELOAD
+        # deliberately overlaps → keep dedup. Layer 3 (Silver window) is the
+        # correctness backstop for query reads either way.
+        skip_dedup = rep.load_type in ("INITIAL_LOAD", "HISTORY_EXTENSION")
+
+        # ── A1: idempotency guard for the skip_dedup replay hole ──
+        # skip_dedup bypasses the dedup scan, so a crash-then-rerun would blindly
+        # re-append every bar → duplicate Bronze rows. If this (symbol, batch_id)
+        # is already present, the prior run's append committed; just finish the
+        # bookkeeping (mark INGESTED) without re-writing.
+        if skip_dedup and self._batch_already_in_bronze(symbol, rep.batch_id):
+            logger.warning(
+                f"[{symbol}] batch {rep.batch_id} already in Bronze — skipping "
+                f"re-append (idempotent replay); marking {len(grp)} chunk(s) INGESTED"
+            )
+            self._mark_ingested([r.request_key for r in grp])
+            return
+
+        vs = self._validator.validate_batch(          # ONE validate for the instrument
+            symbol=symbol, interval=interval, batch_id=rep.batch_id,
+            raw_records=records,
+            pipeline_version=self._pipeline_version,
+            ingestion_type=ingestion_type,
+            instrument_id=instrument_id,
+            ingested_by=f"fetch_agent_{self._vendor}",
+        )
+
+        # ── A3: zero-history instrument (IBKR returned no bars at all) ──
+        # Without a watermark the planner re-issues INITIAL_LOAD every run → an
+        # endless full-history re-fetch of an instrument that has no data. Mark
+        # the requests done and write a zero-count watermark so the planner
+        # switches to (cheap) incremental. Sentinel dates = the target end-date;
+        # NULL is not an option — DeltaWatermarkStore reads dates unconditionally.
+        if not vs.writable_records and not vs.rejected_records:
+            logger.warning(
+                f"[{symbol}] 0 usable bars across {len(grp)} chunk(s) — marking "
+                f"INGESTED and writing zero-count watermark to stop re-INITIAL_LOAD"
+            )
+            self._write_zero_history_watermark(rep, grp)
+            self._mark_ingested([r.request_key for r in grp])
+            return
+
+        wr = self._writer.write_batch(                 # dedup skipped for backfills
+            symbol=symbol, interval=interval, batch_id=rep.batch_id,
+            clean_records=vs.writable_records,
+            rejected_records=vs.rejected_records,
+            main_table=self._stream_cfg.table,
+            rejected_table=self._stream_cfg.rejected_table,
+            skip_dedup=skip_dedup,
+        )
+
+        self._update_watermark(rep, vs)               # ONE watermark (min/max over all)
+        self._mark_ingested([r.request_key for r in grp])   # mark ALL chunks INGESTED
+        self._write_job_run_log(rep, vs, wr, started) # ONE audit row per instrument
+
+        self._last_group_result = {
+            "written":  wr.records_written + wr.records_amended,
+            "rejected": wr.rejected_written,
+        }
+        logger.info(
+            f"[{symbol}] INGESTED {len(grp)} chunk(s) — {wr.records_written} new, "
+            f"{wr.records_amended} amended, {wr.records_skipped} skipped, "
+            f"{wr.rejected_written} rejected"
+        )
+
     # ── phase ④ archive ───────────────────────────────────────────────────────
 
-    def archive_done(self) -> int:
-        """Move receipts of INGESTED requests to done/archive/<today>/."""
-        ingested_keys = {
-            row.request_key for row in self._spark.sql(f"""
-                SELECT request_key FROM {self._catalog}.control.fetch_request
-                WHERE stream = '{self._stream_name}' AND status = 'INGESTED'
-            """).collect()
-        }
+    def archive_done(self, batch_ids: Optional[List[str]] = None) -> int:
+        """Move receipts of INGESTED requests to done/archive/<today>/.
+
+        Housekeeping only — the Delta fetch_request row is the durable audit, so
+        this is best-effort and NON-FATAL: a failed move is retried next run
+        (fs_put overwrites, fs_rm re-removes → idempotent). Scoped to the batch(es)
+        this run ingested so the INGESTED lookup stays bounded (was all-time — it
+        grew unboundedly over the table's lifetime). For long-term cleanup prefer
+        an S3 lifecycle expiry on …/done/ rather than moving files one by one.
+        """
+        # Bound the INGESTED lookup to the batches we just processed.
+        where_batch = ""
+        if batch_ids:
+            keys_sql = ", ".join(f"'{b}'" for b in batch_ids)
+            where_batch = f" AND batch_id IN ({keys_sql})"
+        try:
+            ingested_keys = {
+                row.request_key for row in self._spark.sql(f"""
+                    SELECT request_key FROM {self._catalog}.control.fetch_request
+                    WHERE stream = '{self._stream_name}' AND vendor = '{self._vendor}'
+                      AND status = 'INGESTED'{where_batch}
+                """).collect()
+            }
+        except Exception as e:
+            logger.error(f"archive: could not read INGESTED keys (skipping): {e}")
+            return 0
+
+        if not ingested_keys:
+            return 0
+
         moved = 0
         today = date.today().isoformat()
         try:
@@ -264,18 +417,27 @@ class RawToBronzeJob:
             name = f.path.rstrip("/").split("/")[-1]
             if not name.endswith(".json"):
                 continue
-            if name[:-5] in ingested_keys or name.replace(".json", "") in ingested_keys:
+            if name[:-5] not in ingested_keys:
+                continue
+            try:   # per-file best-effort — one bad move never aborts the phase
                 content = self._fs_head(f.path)
                 self._fs_put(f"{self._archive_prefix}/{today}/{name}", content, True)
                 self._fs_rm(f.path)
                 moved += 1
+            except Exception as e:
+                logger.warning(f"archive: failed to move {name} (retried next run): {e}")
         logger.info(f"archive: {moved} receipt(s) → done/archive/{today}/")
         return moved
 
     def run(self, dry_run: bool = False) -> dict:
         rec = self.reconcile()
         ing = self.ingest(dry_run=dry_run)
-        arch = self.archive_done() if not dry_run else 0
+        arch = 0
+        if not dry_run:
+            try:
+                arch = self.archive_done(batch_ids=ing.get("batch_ids"))
+            except Exception as e:
+                logger.error(f"archive phase failed (non-fatal, data is safe): {e}")
         return {**rec, **ing, "receipts_archived": arch, "dry_run": dry_run}
 
     # ── internals ─────────────────────────────────────────────────────────────
@@ -293,6 +455,47 @@ class RawToBronzeJob:
                 except Exception as e:
                     logger.error(f"unreadable receipt {f.path}: {e}")
         return out
+
+    def _batch_already_in_bronze(self, symbol: str, batch_id: str) -> bool:
+        """True if any Bronze row already exists for this (symbol, batch_id).
+
+        The skip_dedup idempotency guard: batch_id is stamped onto every Bronze
+        row by the validator and is stable across re-runs (it comes from
+        fetch_request), so its presence means the prior run's append committed.
+        Targeted (symbol + batch_id) — not a full-table scan. Values are our own
+        generated identifiers; single-quotes escaped defensively regardless."""
+        full_table = f"{self._catalog}.{self._bronze_schema}.{self._stream_cfg.table}"
+        sym = symbol.replace("'", "''")
+        bid = batch_id.replace("'", "''")
+        try:
+            row = self._spark.sql(f"""
+                SELECT 1 FROM {full_table}
+                WHERE symbol = '{sym}' AND batch_id = '{bid}' LIMIT 1
+            """).take(1)
+            return len(row) > 0
+        except Exception as e:
+            # Fail SAFE: if we cannot verify, assume NOT written so we do not skip
+            # a real load. A duplicate append is tolerable (Layer 3 dedups reads);
+            # a silently skipped load is not.
+            logger.warning(f"[{symbol}] idempotency check failed ({e}) — proceeding with write")
+            return False
+
+    def _write_zero_history_watermark(self, rep, grp) -> None:
+        """Write a zero-count watermark for an instrument IBKR has no data for,
+        so the planner stops re-issuing INITIAL_LOAD. Sentinel date = the target
+        end-date of the requested range (NULL is unsafe — the store reads dates
+        unconditionally). Non-fatal: a watermark failure must not fail the group."""
+        try:
+            end_dates = [r.end_date for r in grp if getattr(r, "end_date", None)]
+            sentinel = max(end_dates) if end_dates else date.today()
+            self._watermarks.update_watermark(
+                instrument_id=rep.instrument_id, stream=self._stream_name,
+                interval=rep.bar_interval, earliest_date=sentinel, latest_date=sentinel,
+                record_count=0, batch_id=rep.batch_id,
+                mode=rep.load_type.lower(), status="success", vendor=rep.vendor,
+            )
+        except Exception as e:
+            logger.error(f"[{rep.symbol}] zero-history watermark write failed (non-fatal): {e}")
 
     def _update_watermark(self, r, vs) -> None:
         dates = [rec.get("bar_date") for rec in vs.writable_records if rec.get("bar_date")]
