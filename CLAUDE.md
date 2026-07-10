@@ -15,7 +15,7 @@
 | GitHub | `hemachandra-menakuru/tradeanalytics` (private) |
 | Claude Project | `handh_tradeanalytics` |
 | AWS Account | `311925399625`, region `us-east-1` |
-| Databricks | `dbc-bf0075e6-07aa.cloud.databricks.com`, workspace `handh-dev` |
+| Databricks | `dbc-46a555ac-7f7b.cloud.databricks.com`, workspace `handh-dev` (BYO VPC, no NAT, 2026-06-29) |
 | Unity Catalog | `tradeanalytics` |
 | Bronze schema | `tradeanalytics.bronze` |
 | DABs profile | `handh-trade-aws` |
@@ -84,8 +84,11 @@ Adding a new component = implement ABC + register (one line) + update YAML. Zero
 |-------|------|--------|
 | 1 | Infrastructure | ✅ Complete |
 | 2 | Bronze Ingestion | ✅ Merged to main — PR #6, 2026-06-25. IBKR smoke test passed, source=ibkr confirmed |
-| 2.5 | Pre-Phase 3 Restructure | ✅ Complete — merged to main via PR #7, 2026-06-28. Reference/control tables built and seeded. DeltaWatermarkStore, DeltaUniverseReader, table-driven IngestionPlanner all wired. Smoke test passed (2 SPY records, source=ibkr, instrument_id=505 watermark in control schema). |
-| 3 | Silver (Feature Engineering) | Not started — blocked on Phase 2.5 completion |
+| 2.5 | Pre-Phase 3 Restructure | ✅ Complete — merged to main via PR #7, 2026-06-28. Reference/control tables built and seeded. DeltaWatermarkStore, DeltaUniverseReader, table-driven IngestionPlanner all wired. |
+| 3A | Corporate Actions + Vendor-Agnostic Schema | ✅ Complete — DDL notebook run on cluster 2026-06-28. ibkr_con_id migrated to instrument_vendor_id and dropped. Corporate actions tables created. Python classes written and tested (93 tests). |
+| 3 (pre) | Bronze pre-Silver fixes | ✅ Complete 2026-06-28 — instrument_id stamped on bronze records, ingested_by fixed (was NULL), vendor wired into watermark, schema_migrations notebook run. 8-instrument Yahoo ingestion verified on feature/phase3-silver. |
+| 2-Plane Ingestion | Two-plane Bronze pipeline (planner → EC2 agent → raw_to_bronze) | ✅ BUILT, validated, optimized & LOADED. 2026-07-07: 35-instrument ML-dev universe, 15yr, 133,798 bars. **2026-07-10: perf+robustness hardening (§3.5.1) — set-based reconcile, batched watermark, idempotency guards, Arrow write; ~60-instrument universe loaded; +25 (batch_group C) fetching for a timing test.** Universe rationale in memory project_ml_dev_universe; perf numbers in memory raw_to_bronze_perf_findings. Full guide: docs/runbooks/ingestion_run_guide.md. Schedules still OFF (manual). NEXT: finish +25 load · enable 7pm/8pm crons · PR feature/phase3-silver→main · then Phase 3 Silver. |
+| 3 | Silver (Feature Engineering) | 🔜 Next after ingestion sign-off — step-by-step teaching approach |
 | 4 | Gold + Signal Platform | Not started |
 | 4b | Signal sharing (Telegram/API) | Not started |
 | 5a | HC's execution bot | Not started |
@@ -100,6 +103,39 @@ Adding a new component = implement ABC + register (one line) + update YAML. Zero
 - Never rush ahead to code without concept explanation first
 
 ---
+
+## 3.5 Ingestion Backlog / Enhancements (deferred, not blocking)
+
+| # | Enhancement | Where | Why / trigger |
+|---|---|---|---|
+| ENH-1 | ✅ DONE 2026-07-07 — **grouped raw_to_bronze**. Was per-receipt loop; write_batch dedup joins the FULL Bronze table, so 560 receipts × full-table scan on a GROWING table = O(N²) → the 35-instrument/15yr backfill stalled (~343/560 after 2h). Fixed: `ingest()` groups receipts by instrument → ONE validate + ONE dedup-scan/append + ONE watermark + ONE job_run_log per instrument (35 scans, not 560). Idempotent unchanged. Further win still possible (filter dedup table_df by symbol/date-range in BronzeWriter — deferred). |
+| ENH-4 | ✅ DONE 2026-07-08 — **parallel manifest writes**. Planner wrote 435 manifests via sequential `dbutils.fs.put` (~110s of the 4m21s run; ~2.2h projected at 2k tickers). `FetchRequestRepository.save_all` now writes manifests in a ThreadPoolExecutor (16 workers; I/O-bound S3 puts) → ~runtime/threads. Delta insert still first (single txn); a manifest-write failure leaves PENDING rows the orphan-repair heals. |
+| ENH-6 | **Unify run-audit into ONE job_run_log** (avoid table-per-job sprawl). Today `raw_to_bronze` logs to `control.job_run_log` (instrument-level, instrument_id NOT NULL + FK) and `fetch_planner` logs to a separate `control.planner_run_log` (job-level) — split forced only by job_run_log's NOT NULL/FK. Target: relax instrument_id to nullable, use job_type/job_name discriminator, flexible metrics; ALL jobs (incl. future publisher/execution agents) write ONE row-per-run there; fold planner_run_log in. Interim: `control.v_all_runs` view (notebook 08) already unions both for a single timeline. Trigger: before Phase 4/5 agents add more run types. | Schema migration — do deliberately, not mid-run. |
+| ENH-2 | ✅ MOSTLY DONE 2026-07-10 — **reference-DDL drift resolved**. Verified live schemas via information_schema: `01_create_schemas_and_tables.py` is CANONICAL (matches live for instrument/instrument_listing/universe_membership/market_calendar/ticker_feed_config). Deleted the stale duplicate `01_create_reference_tables.py` (outdated columns + phantom `instrument_feed_config` that never existed live); fixed its dangling refs (2 src docstrings → ticker_feed_config, 03 run-order comment, runbook §15 note). **Two follow-ups remain:** (a) canonical `instrument` CREATE still lists `ibkr_con_id` which Phase 3A DROPPED from live — reconcile the CREATE with the Phase-3A ALTERs so a from-scratch recreate matches; (b) verify `03_create_control_tables.py` isn't a stale duplicate of the control.* tables `01_create_schemas_and_tables.py` already defines (the job_run_log drift was this class). |
+| ENH-3 | **instrument_id 45 reference surgery** — 3 current listings (BF.B/BRK.B/dead placeholder) on one instrument; 2 current ibkr conids. | See §10 Known Issues for the full fix (new instrument rows + repoint + universe_sync uniqueness validation). | Contained, not in active universe. |
+| ENH-7 | **Distributed Bronze write for scale (deferred to hundreds-of-tickers)** — measured 2026-07-10: the big-write cost is the per-instrument **Delta commit** (~25s warm / ~60–76s re-cold), NOT serialization. At 2k tickers the lever is ONE distributed write across instruments via `mapInPandas` (wraps the existing 18-rule validator, runs on workers, no driver OOM) — fewer/larger commits. | `src/bronze/jobs/raw_to_bronze_job.py` ingest loop + `BronzeWriter`. | Only at the hundreds-of-tickers crossover; overkill at 60–85. Full numbers in memory `raw_to_bronze_perf_findings`. |
+| ENH-8 | **Planner: chunk from each instrument's listing/IPO date, not a universal 2011 start** — found 2026-07-10 mixing recent IPOs into a high-ADV batch. The planner requests 15yr for everyone, so for a post-IPO name (PLTR 2020, COIN 2021, etc.) the pre-existence chunks (2011→IPO) each **TIME OUT ~60s** at IBKR before returning 0 bars → ~9 empty chunks × 60s ≈ 9 min *per recent IPO*; a 12-recent-IPO batch adds ~1–1.5h of pure timeout. Established (pre-2011) names are unaffected. Fix: derive/store an "earliest available" date per instrument (bootstrap from the first successful fetch, or IBKR contract details) and start chunking there; the agent could also skip remaining older chunks once one returns empty. Interim: set `ticker_feed_config.target_start_date` to ~the IPO year for recent-IPO names so the planner doesn't emit pre-existence chunks. | `src/bronze/models/ingestion_planner.py` / `src/control/fetch/*` chunking; per-instrument earliest-date source. | Before routinely mixing recent IPOs into batches; not urgent for the pre-2011 core universe. |
+
+### 3.5.1 raw_to_bronze performance + robustness hardening (✅ DONE 2026-07-10)
+
+Landed on `feature/phase3-silver` (5 commits), validated on a real 60-instrument run. **Records flow unchanged; every change carries a guaranteed fallback.**
+
+| Change | What | Measured effect |
+|---|---|---|
+| Set-based reconcile | 435 sequential Delta `UPDATE`s → ONE `MERGE` from a typed temp view (values not f-strings → no injection; only transitions `PENDING`; `failed/` can't clobber `LANDED`). | ~176s → **~30s** |
+| Parallel reconcile reads | `spark.read.text(wholetext=True)` over all receipts (one `fs_ls` + one distributed job) instead of per-file `fs_head`; sequential fallback. | folded into the ~30s |
+| Fault isolation | each instrument group in `try/except` → a poison payload is left `LANDED` for retry (monitor flags stuck), other instruments still load. | 1 bad ticker no longer aborts the run |
+| Idempotency guard (A1) | before a `skip_dedup` backfill append, `SELECT 1 … WHERE symbol=? AND batch_id=?` — skips re-append on crash-replay (the hole `skip_dedup` opened). Fails safe (writes if the check errors). | duplicate-free stop/restart |
+| Zero-history watermark (A3) | instrument with 0 IBKR bars gets a sentinel watermark so the planner stops re-issuing `INITIAL_LOAD` forever. | no re-fetch loop |
+| Batched watermark | 60 per-instrument MERGEs → **ONE** set-based MERGE (`DeltaWatermarkStore.update_watermarks_bulk`, `LEAST/GREATEST` widening, additive count) — buffered in driver (<1MB @ 2k). | `Watermark bulk upsert: N in one MERGE` |
+| Batched bookkeeping | one `mark_ingested` MERGE + one `job_run_log` insert for the whole run (was per-instrument); dropped the redundant per-group `get_record_count` scan. | ~130 commits → 2 |
+| Delete-not-copy archive | purge INGESTED `done/` receipts (transient signalling; raw payloads under `s3_data_path` preserved) instead of copy-then-delete; bounded to the run's batch; non-fatal. | 3 S3 ops/file → 1 |
+| Arrow write | pandas + Arrow `createDataFrame` with per-Spark-type nullable dtypes + tz-aware UTC timestamps; **row-path fallback** on any error. | build+ship ~0.5s (write cost is the Delta commit, see ENH-7) |
+
+**Two serverless/UC gotchas fixed same day (memory `serverless_connect_restricted_confs`):**
+`spark.conf.get("spark.sql.files.ignoreMissingFiles")` is read-restricted on serverless Connect → use reader `.option()`; `input_file_name()` is unsupported in UC → use `col("_metadata.file_path")`. Both surface ONLY on the deployed job, not local Databricks Connect — unit tests can't catch them.
+
+**Cost note:** a `raw_to_bronze` **Job** run (~15 min for 25 fresh loads) auto-terminates → low single-digit $. The money trap is interactive warm sessions, not job duration (see §13b).
 
 ## 4. File Structure
 
@@ -312,13 +348,15 @@ tradeanalytics.gold        — Phase 4 (signals, ML)
 |---|---|---|
 | `reference.instrument` | Permanent master record per financial instrument | `instrument_id` (BIGINT, auto, permanent) |
 | `reference.instrument_listing` | Symbol, exchange, MIC — SCD Type 2 | `listing_id`; FK `instrument_id` |
+| `reference.instrument_vendor_id` | Vendor-specific IDs (IBKR conid, Polygon ticker, etc.) — SCD Type 2, append-only | `vendor_mapping_id`; FK `instrument_id` |
 | `reference.universe_membership` | Which instruments are in which trading universe | FK `instrument_id` |
-| `reference.ticker_feed_config` | DESIRED STATE — target dates, run_frequency, batch_group, priority | FK `instrument_id` |
-| `reference.corporate_actions` | Splits, dividends (raw events) | FK `instrument_id` |
-| `reference.adjustment_factors` | Cumulative price adjustment factors per date | FK `instrument_id` |
+| `reference.ticker_feed_config` | DESIRED STATE — target dates, run_frequency, batch_group, priority, preferred_vendor | FK `instrument_id` |
+| `reference.corporate_actions` | All corporate events (splits, dividends, spinoffs) — append-only audit log | `action_id`; FK `instrument_id` |
+| `reference.adjustment_factors` | Cumulative price adjustment factors per date — deferred to Phase 4 | FK `instrument_id` |
 | `reference.market_calendar` | Exchange holidays and half-days | `exchange_mic + date` |
 
-**`instrument` key fields:** `instrument_id`, `isin` (ISO 6166), `figi` (OpenFIGI), `ibkr_con_id`, `asset_class`
+**`instrument` key fields:** `instrument_id`, `isin` (ISO 6166), `figi` (OpenFIGI), `asset_class`
+**NOTE: `ibkr_con_id` removed from `reference.instrument` in Phase 3A — migrated to `reference.instrument_vendor_id`**
 
 **`instrument_listing` key fields:** `symbol`, `exchange`, `exchange_mic` (ISO 10383), `currency`, `min_tick_size`, `min_lot_size`, `valid_from`, `valid_to`, `is_current`, `change_reason`
 
@@ -330,10 +368,11 @@ tradeanalytics.gold        — Phase 4 (signals, ML)
 
 | Table | Purpose | Key |
 |---|---|---|
-| `control.ingestion_watermark` | ACTUAL STATE — earliest/latest date fetched, status, consecutive_failures | FK `instrument_id + stream` |
+| `control.ingestion_watermark` | ACTUAL STATE — earliest/latest date fetched, status, consecutive_failures, vendor | FK `instrument_id + stream` |
 | `control.ingestion_batch_config` | Which batch_groups and run_frequencies execute per job type | `job_type` |
 | `control.ingestion_command` | Explicit one-off instructions (FORCE_RELOAD, PAUSE, RESUME, SKIP_ONCE) | auto, consumed once |
-| `control.job_run_log` | Full audit trail — records_new, records_rejected, load_type, status per run | auto |
+| `control.job_run_log` | Full audit trail — records_new, records_rejected, load_type, status, vendor per run | auto |
+| `control.corporate_action_candidates` | Saga state machine — DETECTED → CLASSIFIED → RELOAD_TRIGGERED → RESOLVED | `candidate_id`; FK `instrument_id` |
 
 **Watermark status values:** `active` | `suspended` (after N consecutive failures, stops auto-retry) | `paused`
 
@@ -390,8 +429,8 @@ job_name:   "[dev handh_stocks] [dev] Bronze Daily Ingestion"
 job_id:     174217366433843
 schedule:   "0 0 19 * * ?" (7pm Eastern Mon-Fri)
 status:     PAUSED
-policy_id:  001B2429FBD0E8AD
-cluster:    m5.xlarge, 1 worker, SPOT_WITH_FALLBACK
+policy_id:  001DC683697F1238
+cluster:    m5.xlarge, 1 worker, SPOT_WITH_FALLBACK (ID: 0629-032019-xkdutyxc)
 smoke_test_params:
   symbols:    "SPY"
   start_date: "2026-06-16"
@@ -482,6 +521,36 @@ src/shared/
 
 ## 10. Known Issues & Technical Debt
 
+### ⚠️ Reference-data defect: instrument_id 45 pollution (found 2026-07-05, contained)
+`universe_sync` seeding attached THREE unrelated listings to instrument_id 45:
+BF.B (Brown Forman), BRK.B (Berkshire Hathaway), and dead placeholder 2602335D
+(Contra Hologic — listing closed via SCD-2 on 2026-07-05). Consequently
+`instrument_vendor_id` now holds TWO current ibkr mappings for instrument 45
+(conIds 4931 + 72063691). Verified CONTAINED to this single instrument (both
+uniqueness queries return only id 45). No pipeline impact — neither symbol is in
+the active fetch universe.
+**Fix required (reference-data surgery, do deliberately, not mid-flight):**
+1. Create proper `instrument` rows for BF.B and BRK.B; repoint their listings.
+2. Correct the vendor mappings to the new instrument_ids (NOTE: table is
+   append-only SCD-2 — check TBLPROPERTIES before attempting UPDATE; may need
+   append-based correction pattern).
+3. Root-cause `universe_sync`: dot-class/placeholder symbols evidently fell into
+   one instrument bucket. Add validation: (instrument_id, is_current=true) must
+   be UNIQUE in instrument_listing; same for (instrument_id, vendor, is_current)
+   in instrument_vendor_id. Fail the sync loudly on violation.
+
+### ⚠️ MUST FIX BEFORE EXITING PHASE 3A — `e2e_corporate_action_validation` notebook blocked
+`notebooks/validation/e2e_corporate_action_validation.py` cannot run — blocked on Databricks
+cluster availability. Root cause: BYO VPC migration (2026-06-29) broke cluster bootstrap.
+New workspaces have **Secure Cluster Connectivity (SCC) mandatory** — EC2 nodes never get
+public IPs even in public subnets, so without NAT or an SCC relay VPC endpoint, nodes can't
+reach the Databricks control plane to bootstrap (`BOOTSTRAP_TIMEOUT` after ~700s).
+Email sent to Databricks support (2026-06-30) asking for a no-NAT / low-cost alternative,
+budget options, and whether this is AWS-specific vs also applies to Azure/GCP. Awaiting reply.
+Interim fix available: single NAT Gateway (~$16/month, one AZ) — not yet applied, pending
+Databricks' response. **This notebook must successfully run before Phase 3A is considered closed.**
+All 93 corporate actions pytest unit tests pass — this is purely the cluster-based E2E validation step.
+
 ### ⚠️ Date range override not working (investigate before next smoke test)
 `start_date`/`end_date` params passed to `job.run()` but IBKR returned full 10yr
 history instead of 2 days. Root cause: `_days_to_period()` in IBKRProvider may map
@@ -544,42 +613,214 @@ config.daily.intervals             # ["1d"]
 
 S3: `s3://handh-trade-refined-use1/bronze/`
 
-### Reference (built Phase 2.5)
-| Table | Full Name | Records |
-|-------|-----------|---------|
-| Instruments | `tradeanalytics.reference.instrument` | 8 (SPY, QQQ, AAPL, MSFT, GOOGL, AMZN, TSLA, NVDA) |
-| Listings | `tradeanalytics.reference.instrument_listing` | 8 |
-| Universe | `tradeanalytics.reference.universe_membership` | 8 |
-| Feed config | `tradeanalytics.reference.ticker_feed_config` | 8 (all active) |
-| Market calendar | `tradeanalytics.reference.market_calendar` | seeded |
+### Reference (built Phase 2.5 + Phase 3A)
+| Table | Full Name | Records | Notes |
+|-------|-----------|---------|-------|
+| Instruments | `tradeanalytics.reference.instrument` | 8 | `ibkr_con_id` removed in Phase 3A |
+| Listings | `tradeanalytics.reference.instrument_listing` | 8 | |
+| Vendor IDs | `tradeanalytics.reference.instrument_vendor_id` | 8 | IBKR conids migrated from `instrument` |
+| Universe | `tradeanalytics.reference.universe_membership` | 8 | |
+| Feed config | `tradeanalytics.reference.ticker_feed_config` | 8 | Added `preferred_vendor`, `fallback_vendor` |
+| Market calendar | `tradeanalytics.reference.market_calendar` | seeded | |
+| Corporate actions | `tradeanalytics.reference.corporate_actions` | 0 | New in Phase 3A |
 
-### Control (built Phase 2.5)
-| Table | Full Name | Records |
-|-------|-----------|---------|
-| Watermark | `tradeanalytics.control.ingestion_watermark` | 1 (SPY, instrument_id=505, 2026-06-16→2026-06-17) |
-| Batch config | `tradeanalytics.control.ingestion_batch_config` | 3 (daily/weekly/on_demand) |
-| Commands | `tradeanalytics.control.ingestion_command` | 0 |
-| Job run log | `tradeanalytics.control.job_run_log` | 0 |
+### Control (built Phase 2.5 + Phase 3A)
+| Table | Full Name | Records | Notes |
+|-------|-----------|---------|-------|
+| Watermark | `tradeanalytics.control.ingestion_watermark` | 1 (SPY) | Added `vendor` column |
+| Batch config | `tradeanalytics.control.ingestion_batch_config` | 3 | |
+| Commands | `tradeanalytics.control.ingestion_command` | 0 | |
+| Job run log | `tradeanalytics.control.job_run_log` | 0 | Added `vendor` column |
+| Corp action candidates | `tradeanalytics.control.corporate_action_candidates` | 0 | New in Phase 3A — saga state machine |
 
-### Key instrument_ids (permanent)
+### Key instrument_ids (permanent — verified 2026-06-28)
 | Symbol | instrument_id |
 |--------|--------------|
-| SPY | 505 |
-| QQQ | 506 (approx — verify in reference.instrument_listing) |
+| NVDA | 1 |
+| AAPL | 5 |
+| MSFT | 9 |
+| AMZN | 13 |
+| GOOGL | 17 |
+| SPY | TBC — scroll reference.instrument_listing |
+| QQQ | TBC — scroll reference.instrument_listing |
+| TSLA | TBC — scroll reference.instrument_listing |
+
+Note: reference table was seeded with a larger universe (20+ instruments). IDs 1-19+ visible.
+Old Phase 2.5 IDs (SPY=505) are stale — tables were truncated and re-seeded 2026-06-28.
 
 ---
 
 ## 12. Phase 3 Preview (Silver — Feature Engineering)
 
-Step-by-step teaching order:
-1. What is a feature? (EMA, RSI, MACD on real SPY data — visualise first)
-2. What is a label? (forward returns — what are we predicting and why?)
-3. What is the feature matrix? (rows=dates, cols=features — read before training)
-4. Train first XGBoost on SPY
-5. Walk-forward validation — out-of-sample IC
-6. Does it actually have edge?
+### Gap analysis performed 2026-06-28
+External AI feature/label catalog validated against our architecture. Full findings in memory: `phase3_external_catalog_gap_analysis.md`. Key locked decisions:
 
-Planned ABCs: `IndicatorEngine`, `FeatureEngineer`, `FeatureScaler`, `RegimeDetector`
+**Violations to fix before any code:**
+- Feature store primary key = `instrument_id + timestamp` (NOT `symbol`) — symbols change/get reused
+- Hurst exponent is NOT a bar-level microstructure feature — it is a weekly Meta-Router input only (Phase 4)
+- FinBERT/transformer sentiment gated on XGBoost baseline proof first (ML sequencing rule)
+- News sentiment = async batch (daily/4H), never a 5-minute live feed (LLM path rule)
+
+**What to adopt from catalog:** point-in-time correctness, stationarity (raw prices forbidden in feature store), scale invariance, feature metadata structure (formula + intuition + windows + output type + `min_warmup_bars`), continuous/binary/triple-barrier label designs
+
+**Data feasibility for Phase 3:** only daily OHLCV Bronze data is available now. Intraday microstructure, order book, options, and sentiment features → ABCs + placeholder only until data pipelines exist.
+
+### Phase 3A — Corporate Actions + Vendor-Agnostic Schema (complete design)
+
+**Problem:** IBKR retroactively adjusts all historical prices on every split. Our Bronze
+stores old prices. After a 4-for-1 split, stored $500 bars become wrong — IBKR now
+returns $125 for the same date. Bronze must be reloaded (full history, not targeted).
+
+**Detection mechanism:** Daily Spark bulk query compares latest Bronze price per instrument
+against what IBKR currently returns for the same bar. Ratio deviation > 40% = corporate action candidate.
+
+**Saga state machine (`control.corporate_action_candidates`):**
+```
+DETECTED → CLASSIFIED → RELOAD_TRIGGERED → RESOLVED
+                                          → FALSE_POSITIVE (earnings gap, not a split)
+                                          → FAILED (retries exhausted)
+```
+Recovery step runs on every job — picks up any row not in a terminal state.
+
+**Python files (new Phase 3A):**
+| File | Purpose |
+|---|---|
+| `src/shared/base/corporate_actions_provider.py` | `CorporateActionsProvider ABC` — vendor-agnostic interface |
+| `src/reference/providers/ibkr_corporate_actions_provider.py` | IBKR implementation (stub endpoint, conid-based) |
+| `src/reference/providers/yahoo_corporate_actions_provider.py` | Yahoo implementation — seed/verify only, never production |
+| `src/control/corporate_actions/detector.py` | `CorporateActionDetector` — Spark bulk detection |
+| `src/control/corporate_actions/classifier.py` | `CorporateActionClassifier` — ratio-to-event-type classification + saga step |
+
+**IBKRCorporateActionsProvider.from_spark()** loads conid map from `reference.instrument_vendor_id`.
+**YahooCorporateActionsProvider.from_spark()** loads symbol map from `reference.instrument_listing`.
+
+**Vendor-agnostic design:** `ibkr_con_id` removed from `reference.instrument`. All vendor IDs
+in `reference.instrument_vendor_id` (vendor=ibkr|polygon|bloomberg). Adding a new vendor =
+INSERT rows for all instruments, zero schema changes.
+
+**Notebook to run:** `notebooks/reference/04_phase3a_schema_additions.py`
+Run Parts 1–3 first, verify all rows match, then run Part 4 (drop column). Safe to re-run.
+
+### Phase 3 build sequence (locked)
+
+| Part | What | Prerequisite |
+|---|---|---|
+| 3A | Vendor-agnostic schema + corporate actions tables + Python classes | ✅ Written, notebook pending run |
+| B | ABCs: `IndicatorEngine`, `FeatureEngineer`, `LabelEngine` (+ `min_warmup_bars` contract) | Part 3A complete |
+| C | 60+ features — daily OHLCV only (see feature plan below) | Parts 3A + B |
+| D | Label calibration (histogram analysis first) + binary/continuous labels | Part C |
+| E | Enable intraday stream → intraday microstructure features | After stream enabled |
+
+### Target: 60+ features — planned feature groups (Phase 3C)
+
+**Group 1 — Trend (10 features)**
+| Feature | Formula | Notes |
+|---|---|---|
+| SMA 10, 20, 50, 200 | Rolling mean of close | Raw values — use as ratio to close, not raw price |
+| EMA 10, 20, 50 | Exponentially weighted close | More weight on recent prices |
+| SMA crossover binary | `sma_20 > sma_50` → 1/0 | Encodes trend direction |
+| SMA crossover distance | `(sma_20 - sma_50) / close` | Normalised — captures how deep into trend |
+| Price vs SMA200 | `close / sma_200 - 1` | Long-term mean reversion gauge |
+
+**Group 2 — Momentum (12 features)**
+| Feature | Formula | Notes |
+|---|---|---|
+| RSI 14 | Classic Wilder RSI | Bounded 0–100, overbought/oversold |
+| RSI 7 | Faster RSI | Captures short-term exhaustion |
+| ROC 5, 10, 21 | `(close_t / close_t-n) - 1` | Unbounded momentum, different to RSI |
+| MACD line | EMA(12) - EMA(26) | Trend momentum convergence |
+| MACD signal | EMA(9) of MACD | Trigger line |
+| MACD histogram | MACD - signal | Direction of momentum change |
+| Momentum lags | 1d, 5d, 10d, 21d returns | Explicit price change over N days |
+
+**Group 3 — Volatility (8 features)**
+| Feature | Formula | Notes |
+|---|---|---|
+| ATR 14 | Average True Range | Normalised volatility measure |
+| ATR % | `atr_14 / close` | Scale-invariant version |
+| Bollinger upper/lower | SMA ± 2σ | Volatility envelope |
+| Bollinger %B | `(close - bb_lower) / (bb_upper - bb_lower)` | 0=at lower band, 1=at upper band |
+| Bollinger width | `(bb_upper - bb_lower) / bb_mid` | Volatility expansion/contraction |
+| Realised vol 10d | Rolling 10d std of daily returns | Short-term volatility regime |
+| Realised vol 21d | Rolling 21d std of daily returns | Medium-term volatility regime |
+
+**Group 4 — Volume (8 features)**
+| Feature | Formula | Notes |
+|---|---|---|
+| Volume SMA ratio | `volume / volume.rolling(20).mean()` | RVOL — relative volume vs average |
+| OBV | Cumulative `±volume` by direction | On-Balance Volume — trend confirmation |
+| OBV slope | `(obv_t - obv_t-5) / 5` | Direction of OBV trend |
+| Volume ROC 5 | `(vol_t / vol_t-5) - 1` | Volume momentum |
+| Price × Volume | `close × volume` | Dollar volume — liquidity proxy |
+| CMF 20 | Chaikin Money Flow | Buying/selling pressure |
+| Volume z-score | `(volume - vol_mean) / vol_std` | Standardised volume shock |
+| High volume flag | `volume > 2 × vol_sma20` | Binary — unusual volume day |
+
+**Group 5 — Price structure (8 features)**
+| Feature | Formula | Notes |
+|---|---|---|
+| Overnight gap | `(open - prev_close) / prev_close` | Gap up/down at open |
+| Intraday range | `(high - low) / close` | Bar range as % of price |
+| Upper shadow | `(high - max(open,close)) / close` | Rejection wick above |
+| Lower shadow | `(min(open,close) - low) / close` | Rejection wick below |
+| Body size | `abs(close - open) / close` | Candle body % |
+| Close position | `(close - low) / (high - low)` | Where close sits in bar range |
+| Log return | `log(close / prev_close)` | Stationary, normally distributed |
+| Garman-Klass vol | OHLC volatility estimator | More efficient than close-to-close |
+
+**Group 6 — Cross-sectional / relative (6 features)**
+| Feature | Formula | Notes |
+|---|---|---|
+| Rel strength vs SPY | `close / spy_close - 1` | Alpha vs broad market |
+| Rel strength vs QQQ | `close / qqq_close - 1` | Alpha vs tech |
+| Beta 60d | Rolling 60d regression vs SPY | Market sensitivity |
+| Correlation vs SPY 20d | Rolling 20d correlation | Market co-movement |
+| Sector rank (return) | Percentile rank of 21d return in universe | Cross-sectional momentum |
+| Z-score of 21d return | `(ret_21d - mean) / std` across universe | Standardised relative momentum |
+
+**Group 7 — Regime indicators (4 features)**
+| Feature | Formula | Notes |
+|---|---|---|
+| VIX proxy | Realised vol of SPY last 21d | Fear gauge approximation (until VIX data added) |
+| Market breadth | SPY above SMA200 → 1 else 0 | Bull/bear regime binary |
+| Vol regime | `atr_pct > 80th percentile rolling` | High/low vol binary |
+| Trend strength | `abs(sma_20 - sma_50) / atr_14` | How strong is the trend vs noise |
+
+**Group 8 — Lagged features (4 features)**
+| Feature | Notes |
+|---|---|
+| RSI t-1, t-2 | RSI from prior bars — gives model memory of recent signal |
+| ROC(10) t-1 | Prior momentum reading |
+| ATR% t-5 | Prior volatility state |
+
+**Total planned: ~60–65 features.** More can be added by varying windows (RSI-7 vs RSI-14 already counts as 2).
+
+### ML implementation checklist (from notebook review 2026-06-29 — MUST implement)
+
+| # | Item | Phase | Status |
+|---|---|---|---|
+| 1 | ROC (Rate of Change) as a feature — unbounded momentum | 3C | ⬜ |
+| 2 | Historical swing distribution analysis before picking label threshold | 3D | ⬜ |
+| 3 | Binary label: `return >= threshold within N days` with calibrated N and threshold | 3D | ⬜ |
+| 4 | `scale_pos_weight = count(0) / count(1)` — handle class imbalance in XGBoost | 4 | ⬜ |
+| 5 | Probability threshold tuning 0.30→0.90 — default 0.5 is wrong for rare events | 4 | ⬜ |
+| 6 | Stateful walk-forward — portfolio state carries across folds, not reset | 4 | ⬜ |
+| 7 | Nested exit optimisation per fold — SL%, TP%, holding period, MA exit | 4 | ⬜ |
+| 8 | Sortino Ratio as primary optimisation metric (not Sharpe) | 4 | ⬜ |
+| 9 | SHAP values logged to MLflow after each training run | 4 | ⬜ |
+| 10 | Out-of-sample holdout set — completely withheld from all development | 4 | ⬜ |
+
+### Step-by-step teaching order (concept first, always)
+1. What is a feature? (EMA, RSI, MACD on real SPY data — visualise first)
+2. Why raw prices are forbidden (stationarity, split events)
+3. What is `adjustment_factors` and why it must come first
+4. What is a label? (forward returns — what are we predicting and why?)
+5. What is the feature matrix? (rows=dates, cols=features — read before training)
+6. Train first XGBoost on SPY
+7. Walk-forward validation — out-of-sample IC
+8. Does it actually have edge?
+
+Planned ABCs: `IndicatorEngine`, `FeatureEngineer`, `FeatureScaler`, `RegimeDetector`, `LabelEngine`
 Feature store: `tradeanalytics.feature_store.*`
 
 ---
@@ -588,9 +829,308 @@ Feature store: `tradeanalytics.feature_store.*`
 
 1. Upload this `CLAUDE.md` file first
 2. Confirm: any changes since last session?
-3. Run `/Users/hemachandra/anaconda3/envs/tradeanalytics/bin/python -m pytest tests/ -q` — confirm 309 tests (306 passed + 3 skipped gateway tests) on branch `main`
+3. Run `/Users/hemachandra/anaconda3/envs/tradeanalytics/bin/python -m pytest tests/ -q` — confirm 402 passed, 3 skipped on branch `feature/phase3-silver` (all pytest unit tests pass, including 93 corporate actions tests). Note: `notebooks/validation/e2e_corporate_action_validation.py` is a separate cluster-based notebook (not part of the pytest suite) — see Known Issues below, blocked on Databricks cluster availability.
 4. State the immediate task
 5. **Next up: Phase 3 (Silver — feature engineering, step-by-step teaching)**
+
+## 13b. COST SAFETY (Databricks $ — real money, learned 2026-07-07)
+
+A ~77 DBU (~$68) single-day spike traced to running `raw_to_bronze` INTERACTIVELY
+("Run all" in the notebook) on Serverless All-Purpose compute. Two causes:
+(1) O(N²) ingest ran ~2h active (fixed by ENH-1); (2) the interactive serverless
+session stayed WARM and billing ~7h across re-runs + verification queries.
+Interactive serverless has NO task timeout; a Job does (timeout_seconds).
+
+**Rules (enforced + documented):**
+- Run ingestion as the deployed JOB (`databricks bundle run raw_to_bronze` /
+  Workflows → Run now), NEVER interactive "Run all". Jobs auto-terminate + honour
+  the 3600s timeout. Interactive sessions stay warm and bill until detached.
+- `raw_to_bronze` notebook has an `execute` gate (default false) — interactive
+  "Run all" exits without running the heavy job; the Job sets execute=true.
+- Detach/terminate serverless sessions after ad-hoc SQL. Full detail:
+  docs/runbooks/ingestion_run_guide.md §1b.
+
+## 14. Ops Runbook — Known Gotchas
+
+## Infrastructure Decision: Serverless-Only, No Always-On AWS Compute
+
+**Decision date:** 2026-06-30
+**Status:** Active
+
+### Summary
+TradeAnalytics runs exclusively on Databricks Serverless (Notebooks, Workflows,
+SQL Warehouses where unavoidable). We do NOT provision or run classic
+all-purpose / job clusters that require a VPC + NAT Gateway. This avoids the
+~$32/month flat NAT Gateway idle cost and any persistent EC2 cluster spend.
+
+### What this means in practice
+- All Databricks Workflows must target **Serverless compute**, not classic
+  clusters. Do not set `node_type_id` / `num_workers` in job cluster configs
+  in DABs YAML — omit cluster blocks entirely and use the `serverless: true`
+  equivalent for the workflow/task.
+- No standing AWS VPC, NAT Gateway, or Elastic IP should exist purely to
+  support Databricks compute. If a NAT Gateway shows up in the AWS bill,
+  treat it as a misconfiguration to investigate, not an accepted cost.
+- SQL Editor / SQL Warehouse usage is **interactive/ad-hoc only** — prefer
+  Serverless Notebooks with `%sql` magic for routine querying, since SQL
+  Warehouses run at a higher DBU rate. Reserve SQL Warehouses for cases that
+  specifically need the SQL Editor UI or BI-style concurrency.
+- When configuring a SQL Warehouse is unavoidable: size it 2X-Small/X-Small,
+  set Auto-Termination to 1 minute.
+
+### Exception: IBKR EC2 Proxy
+The one persistent EC2 resource we keep running is the small instance
+(t3.small / t4g.small) hosting the Dockerized IB Gateway, because IBKR
+requires a fixed whitelisted IP and Databricks Serverless egresses through a
+rotating IP pool. This is a deliberate, isolated exception — not classic
+Databricks cluster infrastructure — and should stay a single minimal-spec
+instance with a single Elastic IP. Do not stand up any other always-on AWS
+compute alongside it.
+
+### Cost guardrails
+- No Reserved Instances, Savings Plans, or multi-instance EC2 commitments
+  without explicit sign-off — the only persistent compute should be the
+  single IBKR proxy box above.
+- Zero-spend AWS Budget alert should remain active; any NAT Gateway, idle
+  Elastic IP, or classic cluster appearing in billing is a signal to revisit
+  this section.
+
+### Rationale (for context, not to be re-debated casually)
+Evaluated migrating to GCP for lower NAT/idle infra cost; decided against it
+given the AWS-shaped IBKR proxy, Unity Catalog metastore lock-in, and IAM
+rework cost outweighing the marginal savings on a small VM. Revisit only if
+a concrete GCP-specific need arises (not pure cost optimization).
+
+### ⚠️ Supersedes the BYO VPC classic-cluster effort below
+This decision means the BYO VPC + classic interactive cluster work documented
+in this section (2026-06-29) is **no longer the path forward** for compute.
+The cluster bootstrap blocker (SCC mandatory, see Known Issues Section 10) is
+moot under this decision — we do not need a classic cluster to bootstrap at
+all. The `e2e_corporate_action_validation` notebook and any other
+cluster-dependent workflow must be re-evaluated to run on **Serverless**
+compute instead of an all-purpose/job cluster. The VPC/subnet/IGW network
+infrastructure described below remains in place only to support the IBKR EC2
+proxy exception above — not for Databricks compute.
+
+### AWS Network Architecture (post BYO VPC migration 2026-06-29)
+
+**Current state — zero NAT Gateways:**
+- VPC: `vpc-08931caf43fb6812e` (`handh-trade-vpc`, 10.0.0.0/16)
+- Subnets: `subnet-08b8c3ae16006527b` (us-east-1a, public) + `subnet-0f5c5082ad4cf2cdf` (us-east-1b, public)
+- Routing: `0.0.0.0/0 → igw-0dc265bf5839530a0` (Internet Gateway, free)
+- Security group: `sg-0834eda51f5fd5b7c` (`handh-trade-dbx-sg`)
+- Databricks network config: `handh-trade-byo-vpc`
+- NAT Gateways: **NONE** — savings ~$384/year
+- Metastore ID: `920e9d50-8b93-4bf4-9c1a-db07cc9f1971` (account-level, survives workspace recreation)
+- Storage credential IAM role: `arn:aws:iam::311925399625:role/handh-trade-databricks-role`
+
+**Why BYO VPC eliminates NAT:**
+Databricks Classic (default) creates private subnets + NAT in your AWS account.
+BYO VPC with public subnets gives EC2 worker nodes public IPs — they route via IGW directly.
+IBKR has zero impact on this choice: IBKR runs on local Mac only; EC2 workers never touch it.
+
+**If workspace ever needs to be recreated:**
+1. Go to `accounts.cloud.databricks.com` → Cloud resources → Network configurations
+2. Select `handh-trade-byo-vpc` (already exists — reuse it)
+3. Create workspace with same storage + credential + network config
+4. Metastore auto-attaches — all Delta data in S3 survives untouched
+
+**Updated setup guides (in ~/Downloads):**
+- `TradeAnalytics_AWS_Setup_Guide_v3.docx` — §10 NAT elimination + BYO VPC; §4.3.1 IBKR EC2 proxy + raw landing zone (added 2026-07-04)
+- `TradeAnalytics_Databricks_Setup_Guide_v5.docx` — §8 BYO VPC migration; §5.2 SUPERSEDED note + §5.4 Two-Plane Architecture (added 2026-07-04)
+
+### After `databricks bundle deploy` — cluster module cache
+Databricks clusters cache Python `.pyc` bytecode in memory. Deploying new code via
+`databricks bundle deploy` updates files on the workspace filesystem but the running
+cluster does not reload them automatically.
+
+**Fix:** After every deploy, either:
+- Restart the cluster (Compute → Restart), OR
+- Detach and re-attach the notebook to the cluster
+
+Serverless compute does not have this problem — it spins a fresh environment per run.
+But serverless has **no outbound internet access** in this workspace — Yahoo Finance and
+IBKR are both unreachable. Always use the regular cluster for notebook-based ingestion.
+
+### Ingestion execution paths
+| Path | IBKR reachable | Yahoo reachable | Module cache issue |
+|---|---|---|---|
+| Regular cluster (notebook) | ❌ | ✅ | ✅ restart after deploy |
+| Serverless (notebook) | ❌ | ❌ | ✅ always fresh |
+| Databricks Connect (local Mac) | ✅ (localhost:5055) | ✅ | ✅ always fresh |
+| Databricks Connect (EC2 proxy) | ✅ (54.197.158.82:4004) | ✅ | ✅ always fresh |
+
+**Production ingestion** uses Databricks Connect — either via local Mac gateway or EC2 proxy.
+
+---
+
+### ARCHITECTURE DECISION — Bronze Ingestion via Pull-Based Bridge (2026-07-03)
+
+**Locked principles (HC, 2026-07-03):** EC2's only responsibility is connectivity to
+IBKR/external sources. Databricks owns ALL ingestion, processing, orchestration, and
+loading. Do not deviate without a critical technical limitation.
+
+**Critical technical limitation found (empirically, twice):** Databricks Serverless in
+this account has ZERO outbound egress — no DNS, no internet — even with the egress
+policy at Full access AND an NCC (`handh-trade-ncc`) created and attached to the
+workspace (verified via `notebooks/ops/connectivity_test.py` on fresh serverless
+sessions, 2026-07-03). Serverless can never initiate a connection to the EC2 gateway.
+
+**Decision: Strategy B — pull-based bridge.** Databricks cannot push to EC2, so EC2
+pulls work from Databricks-owned state. Databricks remains the single control plane.
+
+```
+① PLANNER JOB (serverless, cron 7pm ET Mon–Fri, databricks.yml)
+   IngestionPlanner: desired (ticker_feed_config) vs actual (ingestion_watermark),
+   consumes pending ingestion_command rows (operator one-offs)
+   → INSERT control.fetch_request rows (PENDING; source of truth, audit)
+   → PUT one manifest JSON per request → s3://handh-trade-raw-use1/control/pending/
+   Chunking (e.g. 1-year slices for INITIAL_LOAD) happens HERE — agent stays dumb.
+
+② EC2 BRIDGE AGENT (systemd, ~200 lines: ib_insync + boto3 only, NO src/ deploy)
+   Polls S3 control/pending/ (~60s; costs cents/month, touches no Databricks compute)
+   → fetch from IB Gateway localhost:4004 → land RAW payload to
+   s3://handh-trade-raw-use1/ibkr/… → move manifest to control/done/ (or failed/)
+   Stateless courier: no validation, no schemas, no watermarks, no business logic.
+
+③ INGESTION JOB (serverless) reads landed raw files → DataQualityValidator →
+   BronzeWriter (append-only, 3-layer dedup) → watermark → job_run_log →
+   reconcile fetch_request statuses.
+
+④ MONITOR (Databricks): requests stuck PENDING/FETCHING > threshold → alert.
+```
+
+**Key properties:** SG stays 100% closed (all arrows point outward from EC2);
+raw payloads preserved in s3://…/ibkr/ (original AWS guide §4.3 plan — Bronze
+reprocessable without re-calling IBKR); `ingestion_command` keeps its designed
+operator-only semantics (planner consumes it; NEW table `control.fetch_request`
+is the work queue); EC2 agent has no repo deploy — single small script.
+
+**Rejected: Strategy A (direct serverless→EC2 via NCC stable IPs + SG whitelist).**
+Blocked by the egress limitation above. Also had a security flaw: IB Gateway socket
+API is unauthenticated and NCC default egress IPs are shared regional Databricks IPs.
+If serverless egress ever becomes available, A is a ~1-day migration (same provider
+code; only the initiator changes) — re-evaluate only then. NCC stays attached (free).
+
+### PLATFORM ARCHITECTURE — Two-Plane Design (decided 2026-07-04)
+
+Extends the 2026-07-03 pull-based-bridge decision from ingestion-only to the ENTIRE
+platform lifecycle (ingestion → signals → publishing → LLM enrichment → execution).
+
+**Driving constraints (both permanent):**
+1. Databricks Serverless in this account cannot initiate ANY outbound connection
+   (verified 2026-07-03; known unresolved platform issue; egress control is
+   Enterprise-tier, workspace is Premium; no support contract).
+2. Independent of egress: Spark batch jobs are the wrong runtime for stateful,
+   latency-sensitive external interaction (OrderManager, KillSwitch, PortfolioState
+   are specified as stateful single-instance components — they need a persistent
+   process, not a batch engine). Execution never belonged in Databricks.
+
+**THE PATTERN (one idiom for every external interaction, all phases):**
+Databricks writes intent (Delta control table row + S3 manifest) →
+agent on the connectivity plane polls, executes against the external world,
+lands results in S3/Delta → Databricks validates, records, monitors.
+All arrows point OUTWARD from the agent plane. SG never opens inbound.
+Databricks never needs egress. The Delta+S3 contract is the ONLY boundary.
+
+**Plane 1 — Data & Intelligence (Databricks Serverless):**
+Bronze/Silver/Gold, feature engineering, XGBoost/MLflow, signal generation,
+SignalQualityEngine, SignalLog, backtesting, planners & monitors.
+LLM option without egress: Databricks Foundation Model APIs (in-platform).
+Alerting: native job email notifications (control-plane sent — works today).
+
+**Plane 2 — Connectivity & Execution (our VPC, AWS-native, tiny):**
+| Phase | Agent | Runs on |
+|---|---|---|
+| 2-3 (now) | IB Gateway + fetch agent (fetch_request pattern) | existing t4g.small |
+| 4b | publisher agent (Telegram / signal API push) | same box |
+| 4 | LLM enrichment agent (external AI APIs, async batch) | same box |
+| 5 | execution agent (ib_insync orders, OrderManager, KillSwitch) | own instance/Fargate + Secrets Manager (hard gate before live) |
+Monitoring: CloudWatch alarms + SNS on agents. IAM instance roles, no keys on disk.
+
+**Rejected alternatives:** fight for serverless egress (unreliable, tier-gated,
+shared-IP security hole vs unauthenticated broker socket); classic compute (NAT
+cost + SCC blocker + reverses serverless-only decision); all-AWS without
+Databricks (rebuilds UC/MLflow/Delta for nothing at this scale).
+
+**Future flexibility:** if serverless egress ever works → any agent can become a
+direct call with zero contract change. Agent outgrows the box → move to
+ECS Fargate, contract unchanged. Sub-second intraday execution ever needed →
+evolve the execution agent internally (SQS/event-driven); not a platform redesign.
+
+**Cost envelope:** existing t4g.small (~$14/mo) + ~$1-2/mo (S3/CloudWatch/SNS);
+Phase 5 adds ~$15-20/mo. NAT / Enterprise tier / PrivateLink / Kafka: never needed.
+
+**Implementation note:** Chunk 1-3 (fetch_request DDL, planner job, EC2 agent,
+ingestion job) build the first instance of this pattern. Build the manifest schema
+with a generic `task_type` field and the agent as dispatcher + handlers so
+publisher/enrichment/execution agents slot in later without rework.
+
+### IBKR EC2 Proxy — Full Reference (built 2026-07-02)
+
+**Infrastructure:**
+| Item | Value |
+|---|---|
+| Instance | `i-04eba7d6e9f3c6f28`, t4g.small (ARM/Graviton), Ubuntu 22.04 LTS |
+| Elastic IP | `54.197.158.82` (permanent) |
+| Security group | `sg-0bda28a18bc5bb48a` (`handh-trade-ibkr-sg`) |
+| SSH key | `~/.ssh/handh-trade-ibkr-proxy.pem` |
+| Compose file | `~/ibkr-gateway/docker-compose.yml` on the instance |
+| Docker image | `gnzsnz/ib-gateway:stable` |
+| API port | **4004** (paper) — NOT 4002; gnzsnz image uses 4004 |
+| VNC port | 5900 — for visual debugging only |
+| Trading mode | paper (`hcmpaper123` / `DUR152323`) |
+
+**Security group ports allowed (locked to owner IP only):**
+| Port | Purpose |
+|---|---|
+| 22 | SSH |
+| 4004 | IB Gateway socket API (paper) |
+| 5900 | VNC |
+
+**Provider:**
+- `IBInsyncProvider` (`src/bronze/providers/ibinsync_provider.py`) — uses `ib_insync` socket protocol
+- Switch gateway: `config/sources.yml` → `sources.ibinsync.gateway_mode: local | ec2`
+- Priority chain: `ibkr (REST) → ibinsync (socket) → polygon → yahoo`
+- Verified: fetched real SPY OHLCV data 2026-06-16→17 ✅
+
+**Where the verification notebook runs:**
+`notebooks/ops/ibkr_gateway_verify.py` must run **locally on the Mac** (terminal or
+IDE — it uses no Spark). It can NEVER run on Databricks serverless or clusters:
+their egress IPs are not whitelisted on the EC2 security group (port 4004 is locked
+to the owner's Mac IP). A Step-0 guard cell fails fast if run on Databricks.
+Run: `python -c "exec(open('notebooks/ops/ibkr_gateway_verify.py').read())"` from repo root
+(tradeanalytics conda env). Same rule applies to ANY notebook touching IBKR.
+
+**IB Gateway clientId registry (allocate new IDs here — collisions break connections):**
+| clientId | Process |
+|---|---|
+| 10 | IBInsyncProvider (Mac, dev/backtest path) |
+| 20 | fetch_agent (EC2, ibkr vendor queue) |
+| 99 | connectivity_test / ad-hoc diagnostics |
+
+**VNC access (visual debugging):**
+- Mac Finder → Go → Connect to Server (⌘K) → `vnc://54.197.158.82:5900`
+- Green dashboard = connected; shows API Server, Market Data Farm, Historical Data Farm
+
+**Key gotchas (hard-won — do not repeat these mistakes):**
+1. **Protocol:** gnzsnz image runs IB Gateway **socket API** (TWS protocol), NOT Client Portal REST. Use `ib_insync`, never `urllib`/`requests` against port 4004.
+2. **Port:** gnzsnz image uses **4004** for paper, not the standard 4002 in IBKR docs. Always verify: `docker exec ibkr-gateway cat /proc/net/tcp | awk '{print $2}' | grep -v local | while read h; do printf '%d\n' 0x${h#*:}; done | sort -nu`
+3. **TrustedIPs:** IB Gateway only trusts 127.0.0.1 by default. Edit the **template** (not live file — it gets regenerated on restart): `docker exec ibkr-gateway sed -i 's/TrustedTwsApiClientIPs=/TrustedTwsApiClientIPs=*/' /home/ibgateway/ibc/config.ini.tmpl`
+4. **Port mapping:** `docker compose restart` does NOT apply port changes. Always use `docker compose down && docker compose up -d` when changing ports.
+5. **Login failure on first start:** If paper account was recently created, IBKR may show "Application In Progress" — wait for IBKR to process (next business day), then restart container.
+
+**Switching from paper to live (when Phase 5 is ready):**
+
+| Change | What to do |
+|---|---|
+| `.env` on EC2 | Update `TWS_USERID` / `TWS_PASSWORD` to live credentials |
+| `docker-compose.yml` | Change `TRADING_MODE: paper` → `TRADING_MODE: live` and port `4004` → `4001` |
+| `config/sources.yml` | Change `ibinsync.gateways.ec2.port: 4004` → `4001` |
+| Security group | Add port 4001 rule; remove port 4004 rule (or keep both during transition) |
+| Credential storage | Store live credentials in AWS Secrets Manager (not .env) — live money warrants stronger protection |
+
+**⚠️ Never put live trading credentials in `.env` on the EC2 box.** The `.env` approach is acceptable for paper (demo money). For live trading, use AWS Secrets Manager + IAM role to inject credentials at runtime. This is a hard requirement before Phase 5.
 ## Project State — June 2026
 
 ---
@@ -1002,7 +1542,7 @@ GitHub: `hemachandra-menakuru/tradeanalytics` (public)
 |---|---|---|
 | OQ-1 | `start_date`/`end_date` widget parameters do not prevent `INITIAL_LOAD` mode — IBKR returns full 10-year history. Option A (post-fetch Python filtering) designed but not implemented. | Designed, not coded |
 | OQ-2 | Smoke test ran with `source=yahoo` due to stale cached notebook. Tables must be truncated and smoke test re-run with IBKR. | Blocked on IBKR gateway being reachable |
-| OQ-3 | IBKR Client Portal REST API is only reachable from local Mac (gateway runs on `localhost:5055`). For Databricks jobs to ingest live data, either: (a) gateway must be tunnelled, or (b) ingestion runs locally and results are written to S3/Delta. Architecture for production ingestion path not finalised. | Open |
+| OQ-3 | IBKR Client Portal REST API is only reachable from local Mac (gateway runs on `localhost:5055`). For Databricks jobs to ingest live data, either: (a) gateway must be tunnelled, or (b) ingestion runs locally and results are written to S3/Delta. Architecture for production ingestion path not finalised. **Serverless compute also has no outbound internet access in this workspace — Yahoo Finance unreachable from serverless. Use regular cluster for notebook-based ingestion, or Databricks Connect for local execution.** | Open |
 
 #### 6.2 Phase 3 Design (Not Yet Started)
 

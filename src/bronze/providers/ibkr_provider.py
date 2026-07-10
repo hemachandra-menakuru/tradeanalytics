@@ -85,7 +85,8 @@ class IBKRProvider(MarketDataProvider):
 
     def __init__(self, config: ConfigNode):
         super().__init__(config)
-        self._base_url    = config.sources.ibkr.base_url
+        gateway_mode      = getattr(config.sources.ibkr, "gateway_mode", "local")
+        self._base_url    = getattr(config.sources.ibkr.gateways, gateway_mode).base_url
         self._verify_ssl  = config.sources.ibkr.verify_ssl
         self._timeout     = config.sources.ibkr.timeout_seconds
         self._max_retries = config.sources.ibkr.max_retries
@@ -337,7 +338,7 @@ class IBKRProvider(MarketDataProvider):
                 continue
 
             # Filter to requested date range
-            record_date = date.fromisoformat(record["date"])
+            record_date = date.fromisoformat(record["bar_date"])
             if start_date <= record_date <= end_date:
                 records.append(record)
 
@@ -502,8 +503,8 @@ class IBKRProvider(MarketDataProvider):
             return {
                 # Identity
                 "symbol":   symbol,
-                "date":     bar_date_str,
-                "interval": interval,
+                "bar_date": bar_date_str,
+                "bar_interval": interval,
                 "source":   self.provider_name,
 
                 # Raw price

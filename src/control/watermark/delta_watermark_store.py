@@ -83,6 +83,7 @@ class DeltaWatermarkStore(WatermarkStore):
         status: str,
         error_message: Optional[str] = None,
         interval: str = "",
+        vendor: Optional[str] = None,
     ) -> None:
         """
         Upsert watermark after a pipeline write.
@@ -114,6 +115,7 @@ class DeltaWatermarkStore(WatermarkStore):
             status               = status,
             consecutive_failures = consecutive_failures,
             last_error_message   = error_message,
+            vendor               = vendor,
         )
 
         if self._mode == "local":
@@ -126,6 +128,76 @@ class DeltaWatermarkStore(WatermarkStore):
             f"earliest={earliest_date}, latest={latest_date}, "
             f"records={record_count}, mode={mode}, status={status}"
         )
+
+    def update_watermarks_bulk(self, entries: List[dict]) -> None:
+        """Set-based watermark upsert — ONE MERGE for the whole run instead of
+        one per instrument. Dates widen via LEAST/GREATEST in SQL (so we also
+        skip the per-instrument get_watermark read); record_count is additive
+        (t.record_count + rows_written this run). Local mode falls back to the
+        ABC loop for tests."""
+        if not entries:
+            return
+        if self._mode == "local":
+            super().update_watermarks_bulk(entries)
+            return
+        self._spark_upsert_bulk(entries)
+
+    def _spark_upsert_bulk(self, entries: List[dict]) -> None:
+        from pyspark.sql.types import (
+            StructType, StructField, LongType, StringType, DateType, TimestampType,
+        )
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        schema = StructType([
+            StructField("instrument_id",  LongType(),      False),
+            StructField("stream",         StringType(),    False),
+            StructField("bar_interval",   StringType(),    True),
+            StructField("run_min_date",   DateType(),      True),
+            StructField("run_max_date",   DateType(),      True),
+            StructField("rows_written",   LongType(),      False),
+            StructField("last_batch_id",  StringType(),    True),
+            StructField("last_load_type", StringType(),    True),
+            StructField("vendor",         StringType(),    True),
+            StructField("now_ts",         TimestampType(), False),
+        ])
+        rows = [(
+            int(e["instrument_id"]), e["stream"], e.get("interval", ""),
+            e["run_min_date"], e["run_max_date"], int(e["rows_written"]),
+            e["batch_id"], e["mode"], e.get("vendor"), now,
+        ) for e in entries]
+        df = self._spark.createDataFrame(rows, schema=schema)
+        df.createOrReplaceTempView("_wm_bulk")
+
+        # Note: buffer holds exactly one row per instrument+stream (grouped in the
+        # job), so no multi-match. LEAST/GREATEST skip NULLs, so widening is safe
+        # even against a pre-existing row.
+        self._spark.sql(f"""
+            MERGE INTO {self._table} AS t
+            USING _wm_bulk AS s
+            ON t.instrument_id = s.instrument_id AND t.stream = s.stream
+            WHEN MATCHED THEN UPDATE SET
+                t.bar_interval         = s.bar_interval,
+                t.earliest_date        = LEAST(t.earliest_date, s.run_min_date),
+                t.latest_date          = GREATEST(t.latest_date, s.run_max_date),
+                t.last_run_at          = s.now_ts,
+                t.record_count         = t.record_count + s.rows_written,
+                t.last_batch_id        = s.last_batch_id,
+                t.last_load_type       = s.last_load_type,
+                t.status               = 'active',
+                t.consecutive_failures = 0,
+                t.last_error           = NULL,
+                t.vendor               = s.vendor,
+                t.updated_at           = s.now_ts
+            WHEN NOT MATCHED THEN INSERT (
+                instrument_id, stream, bar_interval, earliest_date, latest_date,
+                last_run_at, record_count, last_batch_id, last_load_type,
+                status, consecutive_failures, last_error, vendor, created_at, updated_at
+            ) VALUES (
+                s.instrument_id, s.stream, s.bar_interval, s.run_min_date, s.run_max_date,
+                s.now_ts, s.rows_written, s.last_batch_id, s.last_load_type,
+                'active', 0, NULL, s.vendor, s.now_ts, s.now_ts
+            )
+        """)
+        logger.info(f"Watermark bulk upsert: {len(entries)} instrument(s) in one MERGE")
 
     def list_watermarks(self, stream: Optional[str] = None) -> List[IngestionWatermarkRecord]:
         """Return all watermarks, optionally filtered by stream."""
@@ -184,7 +256,7 @@ class DeltaWatermarkStore(WatermarkStore):
         row = {
             "instrument_id":        record.instrument_id,
             "stream":               record.stream,
-            "interval":             record.interval,
+            "bar_interval":             record.bar_interval,
             "earliest_date":        record.earliest_date,
             "latest_date":          record.latest_date,
             "last_run_at":          now,
@@ -194,6 +266,7 @@ class DeltaWatermarkStore(WatermarkStore):
             "status":               "active",
             "consecutive_failures": record.consecutive_failures,
             "last_error":           record.last_error_message,
+            "vendor":               record.vendor,
             "created_at":           now,
             "updated_at":           now,
         }
@@ -201,7 +274,7 @@ class DeltaWatermarkStore(WatermarkStore):
         schema = StructType([
             StructField("instrument_id",        LongType(),      False),
             StructField("stream",               StringType(),    False),
-            StructField("interval",             StringType(),    False),
+            StructField("bar_interval",             StringType(),    False),
             StructField("earliest_date",        DateType(),      True),
             StructField("latest_date",          DateType(),      True),
             StructField("last_run_at",          TimestampType(), True),
@@ -211,6 +284,7 @@ class DeltaWatermarkStore(WatermarkStore):
             StructField("status",               StringType(),    False),
             StructField("consecutive_failures", IntegerType(),   False),
             StructField("last_error",           StringType(),    True),
+            StructField("vendor",               StringType(),    True),
             StructField("created_at",           TimestampType(), False),
             StructField("updated_at",           TimestampType(), False),
         ])
@@ -225,7 +299,7 @@ class DeltaWatermarkStore(WatermarkStore):
             ON target.instrument_id = source.instrument_id
             AND target.stream       = source.stream
             WHEN MATCHED THEN UPDATE SET
-                target.interval             = source.interval,
+                target.bar_interval         = source.bar_interval,
                 target.earliest_date        = source.earliest_date,
                 target.latest_date          = source.latest_date,
                 target.last_run_at          = source.last_run_at,
@@ -235,16 +309,17 @@ class DeltaWatermarkStore(WatermarkStore):
                 target.status               = source.status,
                 target.consecutive_failures = source.consecutive_failures,
                 target.last_error           = source.last_error,
+                target.vendor               = source.vendor,
                 target.updated_at           = source.updated_at
             WHEN NOT MATCHED THEN INSERT (
-                instrument_id, stream, interval, earliest_date, latest_date,
+                instrument_id, stream, bar_interval, earliest_date, latest_date,
                 last_run_at, record_count, last_batch_id, last_load_type,
-                status, consecutive_failures, last_error, created_at, updated_at
+                status, consecutive_failures, last_error, vendor, created_at, updated_at
             ) VALUES (
-                source.instrument_id, source.stream, source.interval,
+                source.instrument_id, source.stream, source.bar_interval,
                 source.earliest_date, source.latest_date,
                 source.last_run_at, source.record_count, source.last_batch_id, source.last_load_type,
-                source.status, source.consecutive_failures, source.last_error,
+                source.status, source.consecutive_failures, source.last_error, source.vendor,
                 source.created_at, source.updated_at
             )
         """)
@@ -255,7 +330,7 @@ class DeltaWatermarkStore(WatermarkStore):
         return IngestionWatermarkRecord(
             instrument_id        = row["instrument_id"],
             stream               = row["stream"],
-            interval             = row.get("interval") or "",
+            interval             = row.get("bar_interval") or "",
             earliest_date        = date.fromisoformat(str(row["earliest_date"])[:10]),
             latest_date          = date.fromisoformat(str(row["latest_date"])[:10]),
             record_count         = row.get("record_count", 0),
@@ -264,4 +339,5 @@ class DeltaWatermarkStore(WatermarkStore):
             status               = row.get("status", "active"),
             consecutive_failures = row.get("consecutive_failures", 0),
             last_error_message   = row.get("last_error"),
+            vendor               = row.get("vendor"),
         )

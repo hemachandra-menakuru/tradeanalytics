@@ -271,8 +271,8 @@ class YahooProvider(MarketDataProvider):
             return {
                 # Identity
                 "symbol":       symbol,
-                "date":         record_date,
-                "interval":     interval,
+                "bar_date":     record_date,
+                "bar_interval":     interval,
                 "source":       self.provider_name,
 
                 # Raw price

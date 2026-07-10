@@ -140,7 +140,7 @@ class WatermarkManager:
 
         watermark = IngestionWatermark(
             symbol          = symbol,
-            interval        = interval,
+            bar_interval    = interval,
             earliest_date   = earliest_date,
             latest_date     = latest_date,
             record_count    = record_count,
@@ -183,7 +183,7 @@ class WatermarkManager:
             row = df.first().asDict()
             return IngestionWatermark(
                 symbol          = row["symbol"],
-                interval        = row["interval"],
+                interval        = row["bar_interval"],
                 earliest_date   = date.fromisoformat(str(row["earliest_date"])),
                 latest_date     = date.fromisoformat(str(row["latest_date"])),
                 record_count    = row["record_count"],
@@ -212,7 +212,7 @@ class WatermarkManager:
                 r = row.asDict()
                 results.append(IngestionWatermark(
                     symbol          = r["symbol"],
-                    interval        = r["interval"],
+                    interval        = r["bar_interval"],
                     earliest_date   = date.fromisoformat(str(r["earliest_date"])),
                     latest_date     = date.fromisoformat(str(r["latest_date"])),
                     record_count    = r["record_count"],
@@ -238,7 +238,7 @@ class WatermarkManager:
         # Explicit schema prevents CANNOT_DETERMINE_TYPE on None fields
         wm_schema = StructType([
             StructField("symbol",          StringType(), False),
-            StructField("interval",        StringType(), False),
+            StructField("bar_interval",        StringType(), False),
             StructField("earliest_date",   DateType(),   False),
             StructField("latest_date",     DateType(),   False),
             StructField("record_count",    LongType(),   True),
@@ -268,7 +268,7 @@ class WatermarkManager:
             MERGE INTO {full_table} AS target
             USING watermark_update AS source
             ON target.symbol   = source.symbol
-            AND target.interval = source.interval
+            AND target.bar_interval = source.bar_interval
             WHEN MATCHED THEN UPDATE SET *
             WHEN NOT MATCHED THEN INSERT *
         """)

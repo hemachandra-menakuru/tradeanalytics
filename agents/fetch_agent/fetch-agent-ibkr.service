@@ -1,0 +1,18 @@
+[Unit]
+Description=TradeAnalytics Fetch Agent — IBKR vendor queue (Two-Plane bridge courier)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/fetch-agent-ibkr
+ExecStart=/home/ubuntu/fetch-agent-ibkr/venv/bin/python /home/ubuntu/fetch-agent-ibkr/fetch_agent.py
+Restart=always
+RestartSec=15
+Environment=TA_VENDOR=ibkr
+# Other overrides if ever needed (defaults match current paper setup):
+# Environment=TA_IB_PORT=4001
+
+[Install]
+WantedBy=multi-user.target

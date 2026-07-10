@@ -1,7 +1,15 @@
 
 """
-TradeAnalytics Bronze Ingestion Job
-=====================================
+TradeAnalytics Bronze Ingestion Job — DEV / AD-HOC PATH
+========================================================
+⚠ SUPERSEDED for production (2026-07-05) by the Two-Plane pipeline
+(CLAUDE.md §14): FetchPlannerJob → EC2 fetch agent → RawToBronzeJob.
+This class remains the LOCAL DEV / AD-HOC tool: fetch-inline via the provider
+chain + direct Bronze write, driven from notebooks/bronze/bronze_daily_ingestion.py
+on the Mac (Databricks Connect). It cannot run as a cloud job — serverless has
+no egress to any IBKR gateway, and the production-provider guard blocks the
+yahoo fallback by design. Ad-hoc runs bypass fetch_request/job_run_log audit.
+
 Orchestrates the complete Bronze ingestion pipeline for one stream.
 
 Flow per symbol:
@@ -40,7 +48,9 @@ from src.bronze.factory.provider_factory import MarketDataFactory
 from src.bronze.models.ingestion_mode import FetchPlan, IngestionMode
 from src.bronze.models.ingestion_planner import IngestionPlanner
 from src.shared.base.universe_reader import UniverseReader, InstrumentInfo
+from src.shared.base.data_provider import HistoricalDataProvider
 from src.reference.readers.ticker_reader import TickerReader, TickerInfo  # kept for backward compat
+from src.reference.readers.delta_universe_reader import DeltaUniverseReader
 from src.bronze.validation.validator import DataQualityValidator
 from src.bronze.writers.bronze_writer import BronzeWriter, BronzeWriteResult
 from src.bronze.writers.watermark_manager import WatermarkManager
@@ -165,7 +175,16 @@ class BronzeIngestionJob:
         schema  = config.databricks.schemas.bronze
 
         # Wire up components (inject or create defaults)
-        self._ticker_reader: UniverseReader = ticker_reader or TickerReader(config)
+        # Default: DeltaUniverseReader (reads from reference.ticker_feed_config via Spark)
+        # Tests inject TickerReader (CSV) or a mock via ticker_reader param
+        if ticker_reader is not None:
+            self._ticker_reader: UniverseReader = ticker_reader
+        elif spark is not None:
+            self._ticker_reader = DeltaUniverseReader(
+                mode="spark", spark=spark, catalog=catalog
+            )
+        else:
+            self._ticker_reader = TickerReader(config)  # local/test mode only
 
         self._validator = validator or DataQualityValidator.for_stream(
             config, stream_name
@@ -181,7 +200,7 @@ class BronzeIngestionJob:
         )
 
         self._planner          = IngestionPlanner(config, stream_name)
-        self._provider         = MarketDataFactory.get_provider(config)
+        self._provider         = self._resolve_provider(config)
         self._pipeline_version = _get_pipeline_version()
 
         logger.info(
@@ -190,6 +209,44 @@ class BronzeIngestionJob:
             f"mode={self._mode}, "
             f"provider={self._provider.provider_name}, "
             f"pipeline_version={self._pipeline_version}"
+        )
+
+    def _resolve_provider(self, config) -> HistoricalDataProvider:
+        """
+        Walk the priority list from config.sources.priority, health-check each,
+        and return the first one that responds. Works for any number of providers —
+        adding a new source = add it to sources.yml priority list, implement ABC.
+
+        Production guard: if config.sources.production_providers is set, a resolved
+        provider outside that list causes a hard failure instead of a silent
+        fallback — prevents e.g. yahoo data landing in production Bronze.
+        """
+        allowed = config.get("sources.production_providers", default=None)
+
+        chain = MarketDataFactory.get_provider_chain(config)
+        for provider in chain:
+            try:
+                if provider.health_check():
+                    if allowed is not None and provider.provider_name not in list(allowed):
+                        raise RuntimeError(
+                            f"PRODUCTION GUARD: provider '{provider.provider_name}' is healthy "
+                            f"but not in sources.production_providers {list(allowed)}. "
+                            f"All production-approved providers upstream of it are unreachable. "
+                            f"Refusing to ingest from a non-production source — fix connectivity "
+                            f"to an approved provider, or (tests only) remove/extend "
+                            f"production_providers in config."
+                        )
+                    logger.info(f"Provider resolved: {provider.provider_name}")
+                    return provider
+                logger.warning(f"Provider '{provider.provider_name}' health check failed — trying next")
+            except RuntimeError:
+                raise
+            except Exception as e:
+                logger.warning(f"Provider '{provider.provider_name}' health check raised: {e} — trying next")
+
+        raise RuntimeError(
+            f"No available provider. Tried: {[p.provider_name for p in chain]}. "
+            f"Check config/sources.yml priority list and provider credentials."
         )
 
     def run(
@@ -233,20 +290,6 @@ class BronzeIngestionJob:
             f"{len(tickers)} symbols, batch_id={batch_id}, "
             f"dry_run={dry_run}"
         )
-
-        # Provider health check before starting
-        if not dry_run and not self._provider.health_check():
-            logger.warning(
-                f"Primary provider {self._provider.provider_name} "
-                f"health check failed — trying fallback"
-            )
-            self._provider = MarketDataFactory.get_fallback_provider(
-                self._config
-            )
-            logger.info(
-                f"Switched to fallback provider: "
-                f"{self._provider.provider_name}"
-            )
 
         # interval is the primary interval for this stream — needed in
         # error handler below where _process_ticker may not have run yet
@@ -402,6 +445,8 @@ class BronzeIngestionJob:
             raw_records=raw_records,
             pipeline_version=self._pipeline_version,
             ingestion_type=plan.ingestion_type,
+            instrument_id=ticker.instrument_id,
+            ingested_by=self._provider.provider_name,
         )
 
         logger.info(
@@ -452,8 +497,8 @@ class BronzeIngestionJob:
             return
 
         written_dates = [
-            r.get("date") for r in validation_summary.writable_records
-            if r.get("date")
+            r.get("bar_date") for r in validation_summary.writable_records
+            if r.get("bar_date")
         ]
         if not written_dates:
             return
@@ -481,6 +526,7 @@ class BronzeIngestionJob:
                 batch_id=batch_id,
                 mode=plan.mode.value,
                 status="success",
+                vendor=self._provider.provider_name,
             )
         elif isinstance(self._watermark_mgr, DeltaWatermarkStore):
             # instrument_id=None (CSV path) + DeltaWatermarkStore — skip watermark update.

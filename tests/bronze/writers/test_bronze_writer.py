@@ -15,7 +15,7 @@ def writer():
 @pytest.fixture
 def clean_record():
     return {
-        "symbol": "AAPL", "date": "2026-06-22", "interval": "1d",
+        "symbol": "AAPL", "bar_date": "2026-06-22", "bar_interval": "1d",
         "source": "yahoo",
         "open": 150.0, "high": 152.5, "low": 149.75, "close": 151.25,
         "volume": 1_000_000,
@@ -28,7 +28,7 @@ def clean_record():
 @pytest.fixture
 def rejected_record():
     return {
-        "symbol": "AAPL", "date": "2026-06-22", "interval": "1d",
+        "symbol": "AAPL", "bar_date": "2026-06-22", "bar_interval": "1d",
         "source": "yahoo",
         "rejected_rule": "high_gte_low",
         "rejection_reason": "High < Low",
@@ -87,6 +87,26 @@ def test_duplicate_record_is_skipped(writer, clean_record):
     )
     assert result.records_skipped == 1
     assert result.records_written == 0
+
+
+def test_skip_dedup_appends_without_classify(writer, clean_record):
+    # First write establishes the record
+    writer.write_batch(
+        symbol="AAPL", interval="1d", batch_id="batch_001",
+        clean_records=[clean_record], rejected_records=[],
+        main_table=MAIN_TABLE, rejected_table=REJECTED_TABLE,
+    )
+    # skip_dedup=True writes it AGAIN as "new" (no dedup scan) — the duplicate is
+    # tolerated by design; Silver's Layer-3 window is the correctness backstop
+    result = writer.write_batch(
+        symbol="AAPL", interval="1d", batch_id="batch_002",
+        clean_records=[clean_record], rejected_records=[],
+        main_table=MAIN_TABLE, rejected_table=REJECTED_TABLE,
+        skip_dedup=True,
+    )
+    assert result.records_written == 1     # appended, not skipped
+    assert result.records_skipped == 0
+    assert result.records_amended == 0
 
 
 def test_amended_record_is_written(writer, clean_record):

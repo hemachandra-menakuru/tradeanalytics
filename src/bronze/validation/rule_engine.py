@@ -97,7 +97,7 @@ def _rule_price_positive(record: dict, cfg: dict) -> Optional[str]:
     return None
 
 def _rule_no_weekend_dates(record: dict, cfg: dict) -> Optional[str]:
-    date_val = record.get("date")
+    date_val = record.get("bar_date")
     if date_val is None:
         return None
     try:
@@ -384,7 +384,7 @@ class RuleEngine:
             except Exception as e:
                 logger.error(
                     f"Rule '{rule_name}' raised exception: {e}. "
-                    f"symbol={record.get('symbol')}, date={record.get('date')}"
+                    f"symbol={record.get('symbol')}, bar_date={record.get('bar_date')}"
                 )
                 error_msg = f"Rule evaluation error: {e}"
                 severity  = RuleSeverity.WARNING.value

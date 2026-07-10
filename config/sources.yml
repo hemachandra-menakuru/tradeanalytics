@@ -3,11 +3,30 @@
 # Change provider here — affects daily, intraday, and tick equally
 
 sources:
-  primary: ibkr
-  fallback: yahoo
+  primary: ibkr           # kept for backward compat — first in priority list
+  fallback: yahoo         # kept for backward compat — last resort
+  priority:               # tried in order until one passes health_check()
+    - ibkr                # Client Portal REST — local Mac only (localhost:5055)
+    - ibinsync            # IB Gateway socket — EC2 proxy (54.197.158.82:4004)
+    - polygon             # cloud-friendly historical — add POLYGON_API_KEY to use
+    - yahoo               # last resort — unofficial, no API key required
+
+  # Providers allowed to write production Bronze data. If the resolved provider
+  # is NOT in this list, BronzeIngestionJob fails loudly instead of silently
+  # ingesting from a non-production source (e.g. yahoo). Locked rule:
+  # "Yahoo Finance = unit test fallback only, never production."
+  production_providers:
+    - ibkr
+    - ibinsync
 
   ibkr:
-    base_url: https://localhost:5055/v1/api
+    gateway_mode: local       # local | ec2 — REST gateway runs on the Mac only;
+                              # the EC2 box runs the SOCKET gateway (use ibinsync for that)
+    gateways:
+      local:
+        base_url: https://localhost:5055/v1/api
+      # No ec2 entry: the EC2 box runs the IB Gateway SOCKET API (port 4004),
+      # not Client Portal REST. Cloud path = ibinsync provider below.
     verify_ssl: false
     timeout_seconds: 30
     max_retries: 3
@@ -15,6 +34,21 @@ sources:
     account_id: ""              # injected from .env (IBKR_ACCOUNT_ID)
     username: ""                # injected from .env (IBKR_USERNAME)
     password: ""                # injected from .env (IBKR_PASSWORD)
+
+  ibinsync:
+    gateway_mode: ec2           # local | ec2  — which gateway to connect to
+    trading_mode: paper         # paper | live — must match TRADING_MODE in EC2 .env
+    client_id: 10               # IB Gateway client ID (1-32; use different IDs for simultaneous connections)
+    timeout_seconds: 30
+    gateways:
+      local:
+        host: 127.0.0.1
+        port_paper: 4002        # IB Gateway paper port (local)
+        port_live: 4001         # IB Gateway live port (local)
+      ec2:
+        host: 54.197.158.82
+        port_paper: 4004        # IB Gateway paper port on EC2 (gnzsnz image uses 4004)
+        port_live: 4001         # IB Gateway live port on EC2
 
   yahoo:
     timeout_seconds: 30

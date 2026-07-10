@@ -1,0 +1,15 @@
+# Dependencies required on Databricks SERVERLESS compute.
+# Serverless spins a fresh minimal environment per run — anything imported by
+# src/ code running in a notebook must be declared here.
+#
+# This file is the single source of truth. It is referenced by:
+#   - databricks.yml  → jobs' serverless environment spec (keep the two in sync)
+#   - Notebook Environment side panel (for interactive serverless notebooks)
+#
+# NOT included: databricks-connect, pyspark (serverless provides Spark),
+# pytest/dev tooling (never runs on serverless).
+
+pyyaml            # ConfigLoader
+python-dotenv     # ConfigLoader .env loading
+ib_insync         # IBInsyncProvider (EC2 IB Gateway socket protocol)
+yfinance          # YahooProvider (test/fallback only — production guard blocks it)

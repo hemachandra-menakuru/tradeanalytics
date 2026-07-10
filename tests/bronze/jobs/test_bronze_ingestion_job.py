@@ -38,8 +38,8 @@ def mock_provider():
     provider.health_check.return_value = True
     provider.get_historical.return_value = [
         {
-            "symbol": "AAPL", "date": "2026-06-20",
-            "interval": "1d", "source": "yahoo",
+            "symbol": "AAPL", "bar_date": "2026-06-20",
+            "bar_interval": "1d", "source": "yahoo",
             "open": 150.0, "high": 152.5,
             "low": 149.75, "close": 151.25,
             "volume": 1_000_000,

@@ -20,8 +20,8 @@ def daily_record():
     """Standard valid daily AAPL record."""
     return BronzeRecord(
         symbol="AAPL",
-        date=date(2026, 6, 19),
-        interval=RecordInterval.DAILY.value,
+        bar_date=date(2026, 6, 19),
+        bar_interval=RecordInterval.DAILY.value,
         source="ibkr",
         batch_id="batch_20260619_100500",
         pipeline_version="9ccf799",
@@ -42,8 +42,8 @@ def intraday_record():
     """Standard valid 1h AAPL record."""
     return BronzeRecord(
         symbol="AAPL",
-        date=date(2026, 6, 19),
-        interval=RecordInterval.HOURLY.value,
+        bar_date=date(2026, 6, 19),
+        bar_interval=RecordInterval.HOURLY.value,
         source="ibkr",
         batch_id="batch_20260619_100500",
         pipeline_version="9ccf799",
@@ -69,7 +69,7 @@ def test_daily_record_creates_successfully(daily_record):
 
 
 def test_intraday_record_creates_successfully(intraday_record):
-    assert intraday_record.interval == "1h"
+    assert intraday_record.bar_interval == "1h"
     assert intraday_record.bar_time_utc == "2026-06-19T13:30:00Z"
 
 
@@ -84,7 +84,7 @@ def test_validate_identity_fails_empty_symbol(daily_record):
 
 
 def test_validate_identity_fails_invalid_interval(daily_record):
-    daily_record.interval = "2d"
+    daily_record.bar_interval = "2d"
     with pytest.raises(ValueError, match="Unknown interval"):
         daily_record.validate_identity()
 
@@ -110,8 +110,8 @@ def test_intraday_record_table_tier(intraday_record):
 
 def test_tick_record_table_tier():
     record = BronzeRecord(
-        symbol="AAPL", date=date(2026, 6, 19),
-        interval=RecordInterval.ONE_MIN.value,
+        symbol="AAPL", bar_date=date(2026, 6, 19),
+        bar_interval=RecordInterval.ONE_MIN.value,
         source="ibkr", batch_id="batch_001",
         pipeline_version="abc123",
         open=150.0, high=150.5, low=149.9, close=150.2,
@@ -124,7 +124,7 @@ def test_tick_record_table_tier():
 def test_daily_unique_key_excludes_bar_time(daily_record):
     key = daily_record.unique_key
     assert "bar_time_utc" not in key
-    assert set(key.keys()) == {"symbol", "date", "interval"}
+    assert set(key.keys()) == {"symbol", "bar_date", "bar_interval"}
 
 
 def test_intraday_unique_key_includes_bar_time(intraday_record):
@@ -248,8 +248,8 @@ def test_completeness_high_for_rich_record(daily_record):
 
 def test_completeness_lower_for_sparse_record():
     sparse = BronzeRecord(
-        symbol="AAPL", date=date(2026, 6, 19),
-        interval="1d", source="yahoo",
+        symbol="AAPL", bar_date=date(2026, 6, 19),
+        bar_interval="1d", source="yahoo",
         batch_id="batch_001", pipeline_version="abc",
         open=150.0, high=152.0, low=149.0, close=151.0,
         volume=1_000_000,
@@ -269,7 +269,7 @@ def test_to_dict_returns_dict(daily_record):
 def test_to_dict_contains_all_groups(daily_record):
     d = daily_record.to_dict()
     # Group 1
-    assert "symbol" in d and "date" in d and "interval" in d
+    assert "symbol" in d and "bar_date" in d and "bar_interval" in d
     # Group 2
     assert "open" in d and "close" in d and "volume" in d
     # Group 3
@@ -288,8 +288,8 @@ def test_to_dict_contains_all_groups(daily_record):
 
 def test_to_dict_date_is_string(daily_record):
     d = daily_record.to_dict()
-    assert isinstance(d["date"], str)
-    assert d["date"] == "2026-06-19"
+    assert isinstance(d["bar_date"], str)
+    assert d["bar_date"] == "2026-06-19"
 
 
 def test_to_dict_data_quality_reasons_is_json_string(daily_record):
@@ -310,7 +310,7 @@ def test_record_interval_is_intraday():
 
 def test_record_interval_unique_key_fields_daily():
     fields = RecordInterval.get_unique_key_fields("1d")
-    assert fields == ["symbol", "date", "interval"]
+    assert fields == ["symbol", "bar_date", "bar_interval"]
 
 
 def test_record_interval_unique_key_fields_intraday():
@@ -324,8 +324,8 @@ def test_record_interval_unique_key_fields_intraday():
 def test_rejected_record_creates_successfully():
     rejected = RejectedRecord(
         symbol="AAPL",
-        date="2026-06-19",
-        interval="1d",
+        bar_date="2026-06-19",
+        bar_interval="1d",
         source="ibkr",
         batch_id="batch_001",
         rejected_rule="high_gte_low",
@@ -344,7 +344,7 @@ def test_rejected_record_creates_successfully():
 
 def test_rejected_record_to_dict():
     rejected = RejectedRecord(
-        symbol="AAPL", date="2026-06-19", interval="1d",
+        symbol="AAPL", bar_date="2026-06-19", bar_interval="1d",
         source="ibkr", batch_id="batch_001",
         rejected_rule="price_positive",
         rejection_reason="Close price is 0.0",
@@ -368,8 +368,8 @@ def test_repr_is_readable(daily_record):
 def test_blank_symbol_raises_at_construction():
     with pytest.raises(ValueError, match="symbol"):
         BronzeRecord(
-            symbol="   ", date=date(2026, 6, 19),
-            interval="1d", source="ibkr",
+            symbol="   ", bar_date=date(2026, 6, 19),
+            bar_interval="1d", source="ibkr",
             batch_id="batch_001", pipeline_version="abc",
             open=150.0, high=152.0, low=149.0, close=151.0, volume=1_000_000,
         )
@@ -378,8 +378,8 @@ def test_blank_symbol_raises_at_construction():
 def test_blank_source_raises_at_construction():
     with pytest.raises(ValueError, match="source"):
         BronzeRecord(
-            symbol="AAPL", date=date(2026, 6, 19),
-            interval="1d", source="   ",
+            symbol="AAPL", bar_date=date(2026, 6, 19),
+            bar_interval="1d", source="   ",
             batch_id="batch_001", pipeline_version="abc",
             open=150.0, high=152.0, low=149.0, close=151.0, volume=1_000_000,
         )
@@ -388,8 +388,8 @@ def test_blank_source_raises_at_construction():
 def test_blank_batch_id_raises_at_construction():
     with pytest.raises(ValueError, match="batch_id"):
         BronzeRecord(
-            symbol="AAPL", date=date(2026, 6, 19),
-            interval="1d", source="ibkr",
+            symbol="AAPL", bar_date=date(2026, 6, 19),
+            bar_interval="1d", source="ibkr",
             batch_id="", pipeline_version="abc",
             open=150.0, high=152.0, low=149.0, close=151.0, volume=1_000_000,
         )
@@ -398,8 +398,8 @@ def test_blank_batch_id_raises_at_construction():
 def test_unknown_interval_raises_at_construction():
     with pytest.raises(ValueError, match="Unknown interval"):
         BronzeRecord(
-            symbol="AAPL", date=date(2026, 6, 19),
-            interval="2d", source="ibkr",
+            symbol="AAPL", bar_date=date(2026, 6, 19),
+            bar_interval="2d", source="ibkr",
             batch_id="batch_001", pipeline_version="abc",
             open=150.0, high=152.0, low=149.0, close=151.0, volume=1_000_000,
         )
@@ -408,8 +408,8 @@ def test_unknown_interval_raises_at_construction():
 def test_intraday_missing_bar_time_raises_at_construction():
     with pytest.raises(ValueError, match="bar_time_utc"):
         BronzeRecord(
-            symbol="AAPL", date=date(2026, 6, 19),
-            interval="1h", source="ibkr",
+            symbol="AAPL", bar_date=date(2026, 6, 19),
+            bar_interval="1h", source="ibkr",
             batch_id="batch_001", pipeline_version="abc",
             open=150.0, high=152.0, low=149.0, close=151.0, volume=1_000_000,
             bar_time_utc=None,  # missing — must raise
@@ -419,8 +419,8 @@ def test_intraday_missing_bar_time_raises_at_construction():
 def test_intraday_blank_bar_time_raises_at_construction():
     with pytest.raises(ValueError, match="bar_time_utc"):
         BronzeRecord(
-            symbol="AAPL", date=date(2026, 6, 19),
-            interval="1h", source="ibkr",
+            symbol="AAPL", bar_date=date(2026, 6, 19),
+            bar_interval="1h", source="ibkr",
             batch_id="batch_001", pipeline_version="abc",
             open=150.0, high=152.0, low=149.0, close=151.0, volume=1_000_000,
             bar_time_utc="   ",  # blank — must raise
@@ -475,8 +475,8 @@ def test_unique_key_safe_for_valid_intraday(intraday_record):
 def test_blank_symbol_raises_at_construction():
     with pytest.raises(ValueError, match="symbol"):
         BronzeRecord(
-            symbol="   ", date=date(2026, 6, 19),
-            interval="1d", source="ibkr",
+            symbol="   ", bar_date=date(2026, 6, 19),
+            bar_interval="1d", source="ibkr",
             batch_id="batch_001", pipeline_version="abc",
             open=150.0, high=152.0, low=149.0, close=151.0, volume=1_000_000,
         )
@@ -485,8 +485,8 @@ def test_blank_symbol_raises_at_construction():
 def test_blank_source_raises_at_construction():
     with pytest.raises(ValueError, match="source"):
         BronzeRecord(
-            symbol="AAPL", date=date(2026, 6, 19),
-            interval="1d", source="   ",
+            symbol="AAPL", bar_date=date(2026, 6, 19),
+            bar_interval="1d", source="   ",
             batch_id="batch_001", pipeline_version="abc",
             open=150.0, high=152.0, low=149.0, close=151.0, volume=1_000_000,
         )
@@ -495,8 +495,8 @@ def test_blank_source_raises_at_construction():
 def test_blank_batch_id_raises_at_construction():
     with pytest.raises(ValueError, match="batch_id"):
         BronzeRecord(
-            symbol="AAPL", date=date(2026, 6, 19),
-            interval="1d", source="ibkr",
+            symbol="AAPL", bar_date=date(2026, 6, 19),
+            bar_interval="1d", source="ibkr",
             batch_id="", pipeline_version="abc",
             open=150.0, high=152.0, low=149.0, close=151.0, volume=1_000_000,
         )
@@ -505,8 +505,8 @@ def test_blank_batch_id_raises_at_construction():
 def test_unknown_interval_raises_at_construction():
     with pytest.raises(ValueError, match="Unknown interval"):
         BronzeRecord(
-            symbol="AAPL", date=date(2026, 6, 19),
-            interval="2d", source="ibkr",
+            symbol="AAPL", bar_date=date(2026, 6, 19),
+            bar_interval="2d", source="ibkr",
             batch_id="batch_001", pipeline_version="abc",
             open=150.0, high=152.0, low=149.0, close=151.0, volume=1_000_000,
         )
@@ -515,8 +515,8 @@ def test_unknown_interval_raises_at_construction():
 def test_intraday_missing_bar_time_raises_at_construction():
     with pytest.raises(ValueError, match="bar_time_utc"):
         BronzeRecord(
-            symbol="AAPL", date=date(2026, 6, 19),
-            interval="1h", source="ibkr",
+            symbol="AAPL", bar_date=date(2026, 6, 19),
+            bar_interval="1h", source="ibkr",
             batch_id="batch_001", pipeline_version="abc",
             open=150.0, high=152.0, low=149.0, close=151.0, volume=1_000_000,
             bar_time_utc=None,  # missing — must raise
@@ -526,8 +526,8 @@ def test_intraday_missing_bar_time_raises_at_construction():
 def test_intraday_blank_bar_time_raises_at_construction():
     with pytest.raises(ValueError, match="bar_time_utc"):
         BronzeRecord(
-            symbol="AAPL", date=date(2026, 6, 19),
-            interval="1h", source="ibkr",
+            symbol="AAPL", bar_date=date(2026, 6, 19),
+            bar_interval="1h", source="ibkr",
             batch_id="batch_001", pipeline_version="abc",
             open=150.0, high=152.0, low=149.0, close=151.0, volume=1_000_000,
             bar_time_utc="   ",  # blank — must raise
@@ -581,8 +581,8 @@ def test_validate_identity_fails_missing_batch_id_at_construction():
     """batch_id is enforced at construction, not post-mutation."""
     with pytest.raises(ValueError, match="batch_id"):
         BronzeRecord(
-            symbol="AAPL", date=date(2026, 6, 19),
-            interval="1d", source="ibkr",
+            symbol="AAPL", bar_date=date(2026, 6, 19),
+            bar_interval="1d", source="ibkr",
             batch_id="", pipeline_version="abc",
             open=150.0, high=152.0, low=149.0, close=151.0, volume=1_000_000,
         )
@@ -593,8 +593,8 @@ def test_validate_identity_fails_missing_batch_id_at_construction():
 def test_none_open_raises_at_construction():
     with pytest.raises(ValueError, match="open"):
         BronzeRecord(
-            symbol="AAPL", date=date(2026, 6, 19),
-            interval="1d", source="ibkr",
+            symbol="AAPL", bar_date=date(2026, 6, 19),
+            bar_interval="1d", source="ibkr",
             batch_id="batch_001", pipeline_version="abc",
             open=None, high=152.0, low=149.0, close=151.0, volume=1_000_000,
         )
@@ -603,8 +603,8 @@ def test_none_open_raises_at_construction():
 def test_none_close_raises_at_construction():
     with pytest.raises(ValueError, match="close"):
         BronzeRecord(
-            symbol="AAPL", date=date(2026, 6, 19),
-            interval="1d", source="ibkr",
+            symbol="AAPL", bar_date=date(2026, 6, 19),
+            bar_interval="1d", source="ibkr",
             batch_id="batch_001", pipeline_version="abc",
             open=150.0, high=152.0, low=149.0, close=None, volume=1_000_000,
         )
@@ -613,8 +613,8 @@ def test_none_close_raises_at_construction():
 def test_none_volume_raises_at_construction():
     with pytest.raises(ValueError, match="volume"):
         BronzeRecord(
-            symbol="AAPL", date=date(2026, 6, 19),
-            interval="1d", source="ibkr",
+            symbol="AAPL", bar_date=date(2026, 6, 19),
+            bar_interval="1d", source="ibkr",
             batch_id="batch_001", pipeline_version="abc",
             open=150.0, high=152.0, low=149.0, close=151.0, volume=None,
         )
@@ -641,8 +641,8 @@ def test_has_corporate_action_resets_to_false_after_amendment(daily_record):
     """
     # Create a record with a split
     record_with_split = BronzeRecord(
-        symbol="AAPL", date=date(2026, 6, 19),
-        interval="1d", source="ibkr",
+        symbol="AAPL", bar_date=date(2026, 6, 19),
+        bar_interval="1d", source="ibkr",
         batch_id="batch_001", pipeline_version="abc",
         open=600.0, high=605.0, low=598.0, close=601.0, volume=1_000_000,
         split_factor=0.25,

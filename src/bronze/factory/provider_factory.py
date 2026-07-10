@@ -11,7 +11,7 @@ Config path (post stream-config refactor):
 from __future__ import annotations
 
 import logging
-from typing import Dict, Optional, Type
+from typing import Dict, List, Optional, Type
 
 from src.shared.config.config_loader import ConfigNode
 from src.shared.base.data_provider import HistoricalDataProvider
@@ -30,6 +30,7 @@ class MarketDataFactory:
     """
 
     _registry: Dict[str, Type[HistoricalDataProvider]] = {}
+    _providers_loaded: bool = False
 
     @classmethod
     def register(cls, name: str, provider_class: Type[HistoricalDataProvider]) -> None:
@@ -49,6 +50,26 @@ class MarketDataFactory:
         """Create and return the configured fallback provider."""
         source = config.sources.fallback
         return cls._create(source, config)
+
+    @classmethod
+    def get_provider_chain(cls, config: ConfigNode) -> List[HistoricalDataProvider]:
+        """
+        Return all providers in priority order from config.sources.priority.
+        Falls back to [primary, fallback] if priority list not configured.
+        """
+        priority = config.get("sources.priority", default=None)
+        if priority:
+            names = list(priority)
+        else:
+            names = [config.sources.primary, config.sources.fallback]
+
+        providers = []
+        for name in names:
+            try:
+                providers.append(cls._create(name, config))
+            except Exception as e:
+                logger.warning(f"Could not instantiate provider '{name}': {e} — skipping")
+        return providers
 
     @classmethod
     def get_provider_by_name(cls, name: str, config: ConfigNode) -> HistoricalDataProvider:
@@ -74,6 +95,10 @@ class MarketDataFactory:
 
     @classmethod
     def _ensure_providers_registered(cls) -> None:
-        if not cls._registry:
-            from src.bronze.providers import ibkr_provider   # noqa
-            from src.bronze.providers import yahoo_provider  # noqa
+        # Always load both providers exactly once — regardless of manual registrations.
+        # A partial registry (e.g. only yahoo registered manually) must not block ibkr loading.
+        if not cls._providers_loaded:
+            from src.bronze.providers import ibkr_provider      # noqa
+            from src.bronze.providers import yahoo_provider     # noqa
+            from src.bronze.providers import ibinsync_provider  # noqa
+            cls._providers_loaded = True
