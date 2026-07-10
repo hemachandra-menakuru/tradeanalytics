@@ -98,13 +98,21 @@ for k, v in summary.items():
 print("=" * 60)
 
 # COMMAND ----------
-# Operator verification (also single SQL from anywhere):
+# Operator verification — SCOPED to this run's batch(es). A full-table GROUP BY on
+# bronze scans every file (1,286 tasks → ~12 min once the table accreted small
+# files); filtering by batch_id lets Delta data-skipping prune to just this run's
+# files. For a whole-table audit, run OPTIMIZE (notebooks/ops/optimize_bronze) then
+# the ad-hoc query from a SQL cell — not on every ingest.
 display(spark.sql(f"""
     SELECT status, COUNT(*) AS requests
     FROM {config.databricks.catalog}.control.fetch_request GROUP BY status
 """))
-display(spark.sql(f"""
-    SELECT source, COUNT(*) AS bars, MIN(bar_date) AS earliest, MAX(bar_date) AS latest
-    FROM {config.databricks.catalog}.bronze.{config.daily.table}
-    GROUP BY source
-"""))
+_bids = summary.get("batch_ids") or []
+if _bids:
+    _in = "', '".join(_bids)
+    display(spark.sql(f"""
+        SELECT symbol, COUNT(*) AS bars, MIN(bar_date) AS earliest, MAX(bar_date) AS latest
+        FROM {config.databricks.catalog}.bronze.{config.daily.table}
+        WHERE batch_id IN ('{_in}')
+        GROUP BY symbol ORDER BY symbol
+    """))
