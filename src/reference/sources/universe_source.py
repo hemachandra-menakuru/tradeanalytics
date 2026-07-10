@@ -8,7 +8,7 @@ Implementations:
   EtfHoldingsSource  → Index constituents from ETF holdings files (SPY/QQQ/IWM)
 
 Both return RawInstrument objects. The UniverseSyncJob reconciles these
-against the reference.instrument and reference.instrument_feed_config tables.
+against the reference.instrument and reference.ticker_feed_config tables.
 """
 
 from __future__ import annotations

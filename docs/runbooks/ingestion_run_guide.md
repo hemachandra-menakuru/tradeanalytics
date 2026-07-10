@@ -406,12 +406,13 @@ aws s3 rm s3://handh-trade-raw-use1/control/fetch/ibkr/     --recursive --quiet
 
 ## 15. Managing instruments (operational reference)
 
-> ⚠️ **Schema-drift warning.** Two DDL notebooks exist
-> (`01_create_reference_tables.py` and `01_create_schemas_and_tables.py`) with
-> slightly different column sets for some tables (a known issue — same class as
-> the job_run_log drift). **Before running any INSERT/UPDATE below, confirm the
-> live columns** with `DESCRIBE TABLE tradeanalytics.reference.<table>` and adjust.
-> The examples use the columns verified present on 2026-07-05.
+> ✅ **Schema-drift resolved (2026-07-10, ENH-2).** `01_create_schemas_and_tables.py`
+> is the **canonical** reference/control DDL (verified against live via
+> information_schema). The stale duplicate `01_create_reference_tables.py` (outdated
+> columns + a phantom `instrument_feed_config`) was **deleted**. Still good practice
+> to `DESCRIBE TABLE` before a hand-written INSERT/UPDATE. Note: the canonical
+> `instrument` DDL still lists `ibkr_con_id`, which Phase 3A dropped from the live
+> table — reconcile the CREATE with the Phase-3A ALTERs before any from-scratch recreate.
 
 ### 15.1 The control & reference tables — purpose and how they link
 

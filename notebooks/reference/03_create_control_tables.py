@@ -3,7 +3,10 @@
 # Creates all tables in the tradeanalytics.control schema.
 #
 # Safe to re-run: all DDL uses CREATE IF NOT EXISTS.
-# Run this once after 01_create_reference_tables.py has been run.
+# Run this once after 01_create_schemas_and_tables.py has been run.
+# NOTE: 01_create_schemas_and_tables.py already defines the control.* tables
+# (it is the canonical DDL — see the job_run_log rich-schema lesson). Verify this
+# notebook is not a stale duplicate before relying on it (ENH-2 follow-up).
 
 # COMMAND ----------
 

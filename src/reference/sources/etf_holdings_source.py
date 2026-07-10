@@ -3,7 +3,7 @@ TradeAnalytics ETF Holdings Universe Source
 ============================================
 Downloads ETF constituent files from asset manager websites.
 Used to determine which instruments belong to which index universe
-and should have is_active=true in reference.instrument_feed_config.
+and should have is_active=true in reference.ticker_feed_config.
 
 Sources (all public, intended for investor consumption, no license required):
   SPY  → S&P 500       (SPDR / State Street)
