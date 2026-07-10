@@ -12,7 +12,8 @@ Phases per run:
                BronzeWriter (append-only, dedup-classify)
   ③ BOOKKEEP   watermark upsert (instrument_id + stream) ·
                fetch_request → INGESTED · control.job_run_log row (per request)
-  ④ ARCHIVE    done/ receipts → done/archive/<ingest-date>/
+  ④ CLEANUP    delete INGESTED done/ receipts (transient signalling; the raw
+               payloads under s3_data_path are preserved untouched)
 
 Idempotency (rewritten 2026-07-10 — three hard guarantees):
   • RECONCILE is set-based (ONE MERGE, not one UPDATE per receipt) and only
@@ -119,7 +120,6 @@ class RawToBronzeJob:
 
         q = f"s3://{self._raw_bucket}/control/fetch/{vendor}"
         self._done_prefix, self._failed_prefix = f"{q}/done", f"{q}/failed"
-        self._archive_prefix = f"{q}/done/archive"
 
     # ── phase ① reconcile ─────────────────────────────────────────────────────
 
@@ -253,6 +253,12 @@ class RawToBronzeJob:
 
         total_written = total_rejected = ingested = groups_failed = 0
         batch_ids: set = set()
+        # Bookkeeping is BATCHED, not per-group: accumulate here, flush once below.
+        # 65 instruments × (mark UPDATE + job_log INSERT) = 130 Delta commits →
+        # 2 commits. Safe because marking-after-writing widens the crash window
+        # only for work the skip_dedup idempotency guard already re-absorbs.
+        all_ingested_keys: List[str] = []
+        all_job_log_rows: list = []
 
         for (instrument_id, symbol, interval), grp in groups.items():
             # ── fault isolation: one poison instrument must not block the rest ──
@@ -276,6 +282,15 @@ class RawToBronzeJob:
             total_written  += res["written"]
             total_rejected += res["rejected"]
             ingested       += len(grp) if not dry_run else 0
+            all_ingested_keys.extend(res["keys_to_mark"])
+            if res["job_log_row"] is not None:
+                all_job_log_rows.append(res["job_log_row"])
+
+        # ── batched flush (marking is core → may raise; audit is non-fatal) ──
+        if not dry_run and all_ingested_keys:
+            self._mark_ingested(all_ingested_keys)
+        if not dry_run and all_job_log_rows:
+            self._write_job_run_log_bulk(all_job_log_rows)
 
         summary = {"requests_ingested": ingested,
                    "instruments": len(groups),
@@ -291,9 +306,11 @@ class RawToBronzeJob:
 
         Fault-isolated by the caller; each guard below is a distinct edge case
         the earlier code did not handle (duplicate replay, zero-history loop)."""
-        self._last_group_result = {"written": 0, "rejected": 0}
+        self._last_group_result = {"written": 0, "rejected": 0,
+                                   "keys_to_mark": [], "job_log_row": None}
         started = datetime.now(timezone.utc)
         rep = grp[0]   # representative for batch_id / load_type
+        keys = [r.request_key for r in grp]
 
         # Concatenate ALL chunk payloads for this instrument into one record set
         records: List[dict] = []
@@ -323,9 +340,9 @@ class RawToBronzeJob:
         if skip_dedup and self._batch_already_in_bronze(symbol, rep.batch_id):
             logger.warning(
                 f"[{symbol}] batch {rep.batch_id} already in Bronze — skipping "
-                f"re-append (idempotent replay); marking {len(grp)} chunk(s) INGESTED"
+                f"re-append (idempotent replay); will mark {len(grp)} chunk(s) INGESTED"
             )
-            self._mark_ingested([r.request_key for r in grp])
+            self._last_group_result["keys_to_mark"] = keys
             return
 
         vs = self._validator.validate_batch(          # ONE validate for the instrument
@@ -349,7 +366,7 @@ class RawToBronzeJob:
                 f"INGESTED and writing zero-count watermark to stop re-INITIAL_LOAD"
             )
             self._write_zero_history_watermark(rep, grp)
-            self._mark_ingested([r.request_key for r in grp])
+            self._last_group_result["keys_to_mark"] = keys
             return
 
         wr = self._writer.write_batch(                 # dedup skipped for backfills
@@ -361,13 +378,14 @@ class RawToBronzeJob:
             skip_dedup=skip_dedup,
         )
 
-        self._update_watermark(rep, vs)               # ONE watermark (min/max over all)
-        self._mark_ingested([r.request_key for r in grp])   # mark ALL chunks INGESTED
-        self._write_job_run_log(rep, vs, wr, started) # ONE audit row per instrument
+        self._update_watermark(rep, vs, wr)           # ONE watermark; count derived, no scan
+        completed = datetime.now(timezone.utc)
 
         self._last_group_result = {
             "written":  wr.records_written + wr.records_amended,
             "rejected": wr.rejected_written,
+            "keys_to_mark": keys,                      # batched-marked by the caller
+            "job_log_row": self._build_job_log_row(rep, wr, started, completed),
         }
         logger.info(
             f"[{symbol}] INGESTED {len(grp)} chunk(s) — {wr.records_written} new, "
@@ -378,14 +396,23 @@ class RawToBronzeJob:
     # ── phase ④ archive ───────────────────────────────────────────────────────
 
     def archive_done(self, batch_ids: Optional[List[str]] = None) -> int:
-        """Move receipts of INGESTED requests to done/archive/<today>/.
+        """DELETE INGESTED receipts from done/ (was: copy-to-archive/ then delete).
 
-        Housekeeping only — the Delta fetch_request row is the durable audit, so
-        this is best-effort and NON-FATAL: a failed move is retried next run
-        (fs_put overwrites, fs_rm re-removes → idempotent). Scoped to the batch(es)
-        this run ingested so the INGESTED lookup stays bounded (was all-time — it
-        grew unboundedly over the table's lifetime). For long-term cleanup prefer
-        an S3 lifecycle expiry on …/done/ rather than moving files one by one.
+        The done/ receipts are transient *signalling* — the reprocessable raw
+        payloads live under s3_data_path (a different prefix) and are NEVER
+        touched, so preserving receipts buys nothing the fetch_request Delta row
+        (status/landed_at/s3_data_path/record_count) doesn't already hold. So we
+        just delete them, which drops 2 of the 3 S3 ops per file (head+put gone).
+
+        Selective by design — only INGESTED keys are removed, so a stuck-LANDED
+        receipt (a group left for retry) stays in done/. That is exactly why a
+        bulk `rm -r done/` is unsafe and we filter per file. Non-fatal and
+        idempotent (an already-gone file just isn't there next run). Scoped to
+        this run's batch(es) so the lookup stays bounded.
+
+        NEXT WIN (deferred, needs validation): replace the sequential fs_rm with
+        one boto3 delete_objects call per 1,000 keys — but only after confirming
+        serverless exposes working boto3 S3 credentials.
         """
         # Bound the INGESTED lookup to the batches we just processed.
         where_batch = ""
@@ -407,8 +434,7 @@ class RawToBronzeJob:
         if not ingested_keys:
             return 0
 
-        moved = 0
-        today = date.today().isoformat()
+        deleted = 0
         try:
             entries = list(self._fs_ls(self._done_prefix))
         except Exception:
@@ -419,15 +445,13 @@ class RawToBronzeJob:
                 continue
             if name[:-5] not in ingested_keys:
                 continue
-            try:   # per-file best-effort — one bad move never aborts the phase
-                content = self._fs_head(f.path)
-                self._fs_put(f"{self._archive_prefix}/{today}/{name}", content, True)
+            try:   # per-file best-effort — one bad delete never aborts the phase
                 self._fs_rm(f.path)
-                moved += 1
+                deleted += 1
             except Exception as e:
-                logger.warning(f"archive: failed to move {name} (retried next run): {e}")
-        logger.info(f"archive: {moved} receipt(s) → done/archive/{today}/")
-        return moved
+                logger.warning(f"archive: failed to purge {name} (retried next run): {e}")
+        logger.info(f"archive: {deleted} ingested receipt(s) purged from done/")
+        return deleted
 
     def run(self, dry_run: bool = False) -> dict:
         rec = self.reconcile()
@@ -497,17 +521,20 @@ class RawToBronzeJob:
         except Exception as e:
             logger.error(f"[{rep.symbol}] zero-history watermark write failed (non-fatal): {e}")
 
-    def _update_watermark(self, r, vs) -> None:
+    def _update_watermark(self, r, vs, wr) -> None:
         dates = [rec.get("bar_date") for rec in vs.writable_records if rec.get("bar_date")]
         if not dates:
             return
         min_d, max_d = date.fromisoformat(min(dates)), date.fromisoformat(max(dates))
         existing = self._watermarks.get_watermark(r.instrument_id, self._stream_name)
+        # Derive record_count from prior + rows just written — avoids a per-group
+        # COUNT(*) scan of Bronze. Skipped rows add nothing; written + amended are
+        # the only new physical rows for this instrument.
+        prior = existing.record_count if existing is not None else 0
         if existing is not None:
             min_d = min(min_d, existing.earliest_date)
             max_d = max(max_d, existing.latest_date)
-        count = self._writer.get_record_count(
-            symbol=r.symbol, interval=r.bar_interval, table_name=self._stream_cfg.table)
+        count = prior + wr.records_written + wr.records_amended
         self._watermarks.update_watermark(
             instrument_id=r.instrument_id, stream=self._stream_name,
             interval=r.bar_interval, earliest_date=min_d, latest_date=max_d,
@@ -516,33 +543,78 @@ class RawToBronzeJob:
         )
 
     def _mark_ingested(self, request_keys) -> None:
+        """Bulk-mark LANDED → INGESTED in ONE MERGE (was one UPDATE per group).
+
+        Values flow through a typed temp view (no giant f-string IN-list); the
+        MERGE only touches status='LANDED' rows so it is idempotent and never
+        regresses a FAILED/already-INGESTED row."""
         if isinstance(request_keys, str):
             request_keys = [request_keys]
-        keys_sql = ", ".join(f"'{k}'" for k in request_keys)
+        if not request_keys:
+            return
+        from pyspark.sql.types import StructType, StructField, StringType
+        schema = StructType([StructField("request_key", StringType(), False)])
+        df = self._spark.createDataFrame([(k,) for k in request_keys], schema=schema)
+        df.createOrReplaceTempView("_ingested_keys")
         self._spark.sql(f"""
-            UPDATE {self._catalog}.control.fetch_request
-            SET status = 'INGESTED', ingested_at = current_timestamp()
-            WHERE request_key IN ({keys_sql}) AND status = 'LANDED'
+            MERGE INTO {self._catalog}.control.fetch_request AS t
+            USING _ingested_keys AS s
+            ON t.request_key = s.request_key
+            WHEN MATCHED AND t.status = 'LANDED' THEN UPDATE SET
+                t.status = 'INGESTED', t.ingested_at = current_timestamp()
         """)
 
-    def _write_job_run_log(self, r, vs, wr, started) -> None:
-        """First writer of control.job_run_log — one audit row per request."""
-        dur_s = (datetime.now(timezone.utc) - started).total_seconds()
+    def _build_job_log_row(self, r, wr, started, completed) -> tuple:
+        """One control.job_run_log row per instrument, buffered for a bulk insert."""
+        naive = lambda dt: dt.replace(tzinfo=None)
+        return (
+            r.batch_id, "raw_to_bronze", naive(started), naive(completed),
+            (completed - started).total_seconds(), int(r.instrument_id),
+            self._stream_name, r.bar_interval, r.load_type, "success",
+            int(wr.records_written), int(wr.records_amended),
+            int(wr.records_skipped), int(wr.rejected_written),
+            self._pipeline_version, r.vendor,
+        )
+
+    def _write_job_run_log_bulk(self, rows: list) -> None:
+        """Insert all buffered job_run_log rows in ONE write (was one INSERT per
+        instrument). Non-fatal — an audit failure must never fail ingestion."""
+        from pyspark.sql.types import (
+            StructType, StructField, StringType, TimestampType, DoubleType,
+            LongType, IntegerType,
+        )
+        schema = StructType([
+            StructField("batch_id",         StringType(),    False),
+            StructField("job_type",         StringType(),    False),
+            StructField("run_started_at",   TimestampType(), False),
+            StructField("run_completed_at", TimestampType(), False),
+            StructField("duration_seconds", DoubleType(),    False),
+            StructField("instrument_id",    LongType(),      False),
+            StructField("stream",           StringType(),    False),
+            StructField("interval",         StringType(),    True),
+            StructField("load_type",        StringType(),    True),
+            StructField("status",           StringType(),    False),
+            StructField("records_new",      IntegerType(),   True),
+            StructField("records_amended",  IntegerType(),   True),
+            StructField("records_skipped",  IntegerType(),   True),
+            StructField("records_rejected", IntegerType(),   True),
+            StructField("pipeline_version", StringType(),    True),
+            StructField("vendor",           StringType(),    True),
+        ])
         try:
+            df = self._spark.createDataFrame(rows, schema=schema)
+            df.createOrReplaceTempView("_job_run_log_rows")
             self._spark.sql(f"""
                 INSERT INTO {self._catalog}.control.job_run_log
                     (batch_id, job_type, run_started_at, run_completed_at,
                      duration_seconds, instrument_id, stream, interval, load_type,
                      status, records_new, records_amended, records_skipped,
                      records_rejected, pipeline_version, vendor)
-                VALUES
-                    ('{r.batch_id}', 'raw_to_bronze',
-                     '{started.isoformat()}', current_timestamp(),
-                     {dur_s}, {r.instrument_id}, '{self._stream_name}',
-                     '{r.bar_interval}', '{r.load_type}', 'success',
-                     {wr.records_written}, {wr.records_amended}, {wr.records_skipped},
-                     {wr.rejected_written}, '{self._pipeline_version}', '{r.vendor}')
+                SELECT batch_id, job_type, run_started_at, run_completed_at,
+                       duration_seconds, instrument_id, stream, interval, load_type,
+                       status, records_new, records_amended, records_skipped,
+                       records_rejected, pipeline_version, vendor
+                FROM _job_run_log_rows
             """)
         except Exception as e:
-            # Audit failure must never fail ingestion — log loudly, continue.
-            logger.error(f"job_run_log write failed (non-fatal): {e}")
+            logger.error(f"job_run_log bulk write failed (non-fatal): {e}")
