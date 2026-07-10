@@ -257,6 +257,26 @@ SELECT job_type, records_new, status FROM tradeanalytics.control.job_run_log
 | Job failures | Databricks job email (`handh.stocks@gmail.com`) | none |
 | Queue depth | `aws s3 ls .../pending/ \| wc -l` | 0 between runs |
 
+### 9a. Live fetch progress — check S3, NOT fetch_request
+
+**Gotcha:** while the agent is fetching, `control.fetch_request` stays `PENDING` —
+the agent only moves manifests in S3; the PENDING→LANDED transition happens in
+`raw_to_bronze`'s **reconcile**, not from the agent. So during a fetch, `SELECT
+status … FROM fetch_request` shows `PENDING=N` and that is CORRECT, not stuck.
+Watch **S3** for live progress; watch the **table** only after the ingest runs.
+
+One-shot progress (filter to the current batch — the timestamp in the batch_id):
+```bash
+P=s3://handh-trade-raw-use1/control/fetch/ibkr
+BID=_040641_     # the batch's HHMMSS from the planner run / agent log
+echo "pending: $(aws s3 ls $P/pending/ | grep -c $BID)"   # → drains to 0 when done
+echo "done:    $(aws s3 ls $P/done/    | grep -c $BID)"    # landed so far
+echo "failed:  $(aws s3 ls $P/failed/  | grep -c $BID)"    # genuine errors only
+```
+`done + failed` reaches the planner's emitted total when `pending = 0` → then run
+`raw_to_bronze`. (A 0-bar `LANDED` — e.g. IBKR error-162 "no data" on a recent
+chunk — still counts as done, not failed; the grouped ingest concatenates it away.)
+
 ---
 
 ## 10. Operational checklist (production run)

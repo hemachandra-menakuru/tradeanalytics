@@ -87,7 +87,7 @@ Adding a new component = implement ABC + register (one line) + update YAML. Zero
 | 2.5 | Pre-Phase 3 Restructure | ✅ Complete — merged to main via PR #7, 2026-06-28. Reference/control tables built and seeded. DeltaWatermarkStore, DeltaUniverseReader, table-driven IngestionPlanner all wired. |
 | 3A | Corporate Actions + Vendor-Agnostic Schema | ✅ Complete — DDL notebook run on cluster 2026-06-28. ibkr_con_id migrated to instrument_vendor_id and dropped. Corporate actions tables created. Python classes written and tested (93 tests). |
 | 3 (pre) | Bronze pre-Silver fixes | ✅ Complete 2026-06-28 — instrument_id stamped on bronze records, ingested_by fixed (was NULL), vendor wired into watermark, schema_migrations notebook run. 8-instrument Yahoo ingestion verified on feature/phase3-silver. |
-| 2-Plane Ingestion | Two-plane Bronze pipeline (planner → EC2 agent → raw_to_bronze) | ✅ BUILT, validated, optimized & LOADED. 2026-07-07: **35-instrument ML-dev universe, 15yr history, 133,798 bars in bronze.market_data_daily (2011-01-03→2026-07-06), 560 INGESTED**. ENH-1 fix applied mid-backfill (grouped ingest — killed O(N²) stall). Universe rationale in memory project_ml_dev_universe. Full guide: docs/runbooks/ingestion_run_guide.md. Schedules still OFF (manual). NEXT: enable 7pm/8pm crons · PR feature/phase3-silver→main · then Phase 3 Silver. |
+| 2-Plane Ingestion | Two-plane Bronze pipeline (planner → EC2 agent → raw_to_bronze) | ✅ BUILT, validated, optimized & LOADED. 2026-07-07: 35-instrument ML-dev universe, 15yr, 133,798 bars. **2026-07-10: perf+robustness hardening (§3.5.1) — set-based reconcile, batched watermark, idempotency guards, Arrow write; ~60-instrument universe loaded; +25 (batch_group C) fetching for a timing test.** Universe rationale in memory project_ml_dev_universe; perf numbers in memory raw_to_bronze_perf_findings. Full guide: docs/runbooks/ingestion_run_guide.md. Schedules still OFF (manual). NEXT: finish +25 load · enable 7pm/8pm crons · PR feature/phase3-silver→main · then Phase 3 Silver. |
 | 3 | Silver (Feature Engineering) | 🔜 Next after ingestion sign-off — step-by-step teaching approach |
 | 4 | Gold + Signal Platform | Not started |
 | 4b | Signal sharing (Telegram/API) | Not started |
@@ -113,6 +113,28 @@ Adding a new component = implement ABC + register (one line) + update YAML. Zero
 | ENH-6 | **Unify run-audit into ONE job_run_log** (avoid table-per-job sprawl). Today `raw_to_bronze` logs to `control.job_run_log` (instrument-level, instrument_id NOT NULL + FK) and `fetch_planner` logs to a separate `control.planner_run_log` (job-level) — split forced only by job_run_log's NOT NULL/FK. Target: relax instrument_id to nullable, use job_type/job_name discriminator, flexible metrics; ALL jobs (incl. future publisher/execution agents) write ONE row-per-run there; fold planner_run_log in. Interim: `control.v_all_runs` view (notebook 08) already unions both for a single timeline. Trigger: before Phase 4/5 agents add more run types. | Schema migration — do deliberately, not mid-run. |
 | ENH-2 | **Reference-DDL drift cleanup** — two notebooks (`01_create_reference_tables.py`, `01_create_schemas_and_tables.py`) define some tables with divergent columns (same class as the job_run_log drift already fixed). Pick one canonical DDL notebook per table; delete/redirect the duplicate. | `notebooks/reference/01_*.py`. Verify each live table with DESCRIBE, keep the notebook that matches, remove the other's duplicate CREATE. | Bit us on job_run_log; will bite again on any INSERT built from the wrong notebook. Do alongside the instrument-45 surgery. |
 | ENH-3 | **instrument_id 45 reference surgery** — 3 current listings (BF.B/BRK.B/dead placeholder) on one instrument; 2 current ibkr conids. | See §10 Known Issues for the full fix (new instrument rows + repoint + universe_sync uniqueness validation). | Contained, not in active universe. |
+| ENH-7 | **Distributed Bronze write for scale (deferred to hundreds-of-tickers)** — measured 2026-07-10: the big-write cost is the per-instrument **Delta commit** (~25s warm / ~60–76s re-cold), NOT serialization. At 2k tickers the lever is ONE distributed write across instruments via `mapInPandas` (wraps the existing 18-rule validator, runs on workers, no driver OOM) — fewer/larger commits. | `src/bronze/jobs/raw_to_bronze_job.py` ingest loop + `BronzeWriter`. | Only at the hundreds-of-tickers crossover; overkill at 60–85. Full numbers in memory `raw_to_bronze_perf_findings`. |
+
+### 3.5.1 raw_to_bronze performance + robustness hardening (✅ DONE 2026-07-10)
+
+Landed on `feature/phase3-silver` (5 commits), validated on a real 60-instrument run. **Records flow unchanged; every change carries a guaranteed fallback.**
+
+| Change | What | Measured effect |
+|---|---|---|
+| Set-based reconcile | 435 sequential Delta `UPDATE`s → ONE `MERGE` from a typed temp view (values not f-strings → no injection; only transitions `PENDING`; `failed/` can't clobber `LANDED`). | ~176s → **~30s** |
+| Parallel reconcile reads | `spark.read.text(wholetext=True)` over all receipts (one `fs_ls` + one distributed job) instead of per-file `fs_head`; sequential fallback. | folded into the ~30s |
+| Fault isolation | each instrument group in `try/except` → a poison payload is left `LANDED` for retry (monitor flags stuck), other instruments still load. | 1 bad ticker no longer aborts the run |
+| Idempotency guard (A1) | before a `skip_dedup` backfill append, `SELECT 1 … WHERE symbol=? AND batch_id=?` — skips re-append on crash-replay (the hole `skip_dedup` opened). Fails safe (writes if the check errors). | duplicate-free stop/restart |
+| Zero-history watermark (A3) | instrument with 0 IBKR bars gets a sentinel watermark so the planner stops re-issuing `INITIAL_LOAD` forever. | no re-fetch loop |
+| Batched watermark | 60 per-instrument MERGEs → **ONE** set-based MERGE (`DeltaWatermarkStore.update_watermarks_bulk`, `LEAST/GREATEST` widening, additive count) — buffered in driver (<1MB @ 2k). | `Watermark bulk upsert: N in one MERGE` |
+| Batched bookkeeping | one `mark_ingested` MERGE + one `job_run_log` insert for the whole run (was per-instrument); dropped the redundant per-group `get_record_count` scan. | ~130 commits → 2 |
+| Delete-not-copy archive | purge INGESTED `done/` receipts (transient signalling; raw payloads under `s3_data_path` preserved) instead of copy-then-delete; bounded to the run's batch; non-fatal. | 3 S3 ops/file → 1 |
+| Arrow write | pandas + Arrow `createDataFrame` with per-Spark-type nullable dtypes + tz-aware UTC timestamps; **row-path fallback** on any error. | build+ship ~0.5s (write cost is the Delta commit, see ENH-7) |
+
+**Two serverless/UC gotchas fixed same day (memory `serverless_connect_restricted_confs`):**
+`spark.conf.get("spark.sql.files.ignoreMissingFiles")` is read-restricted on serverless Connect → use reader `.option()`; `input_file_name()` is unsupported in UC → use `col("_metadata.file_path")`. Both surface ONLY on the deployed job, not local Databricks Connect — unit tests can't catch them.
+
+**Cost note:** a `raw_to_bronze` **Job** run (~15 min for 25 fresh loads) auto-terminates → low single-digit $. The money trap is interactive warm sessions, not job duration (see §13b).
 
 ## 4. File Structure
 
