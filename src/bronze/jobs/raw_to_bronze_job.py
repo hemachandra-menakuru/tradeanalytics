@@ -501,7 +501,7 @@ class RawToBronzeJob:
         (logged + skipped), never the batch. Any Spark-side failure falls back to
         the proven sequential path.
         """
-        from pyspark.sql.functions import input_file_name
+        from pyspark.sql.functions import col
 
         try:
             paths = [f.path for f in self._fs_ls(prefix)
@@ -513,10 +513,11 @@ class RawToBronzeJob:
 
         out: List[dict] = []
         try:
+            # _metadata.file_path — NOT input_file_name() (unsupported in Unity Catalog)
             rows = (self._spark.read
                     .option("ignoreMissingFiles", "true")   # reader option, NOT session conf
                     .text(paths, wholetext=True)
-                    .withColumn("_path", input_file_name())
+                    .withColumn("_path", col("_metadata.file_path"))
                     .collect())
             for r in rows:
                 try:
