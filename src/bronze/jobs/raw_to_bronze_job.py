@@ -494,11 +494,12 @@ class RawToBronzeJob:
         One fs_ls enumerates the .json paths (single API call), then
         spark.read.text reads them distributed across the cluster — replacing the
         old per-file sequential fs_head loop (~435 serial S3 GETs). wholetext=True
-        keeps each pretty-printed multi-line receipt intact; ignoreMissingFiles
-        tolerates a file that vanishes mid-read (can't happen during reconcile —
-        phase 1, single-concurrency, agent only adds — but defensive). A malformed
-        receipt fails only its own json.loads (logged + skipped), never the batch.
-        Any Spark-side failure falls back to the proven sequential path.
+        keeps each pretty-printed multi-line receipt intact; ignoreMissingFiles is
+        passed as a READER OPTION (the session conf of the same name is
+        read-restricted on serverless Spark Connect) to tolerate a file that
+        vanishes mid-read. A malformed receipt fails only its own json.loads
+        (logged + skipped), never the batch. Any Spark-side failure falls back to
+        the proven sequential path.
         """
         from pyspark.sql.functions import input_file_name
 
@@ -510,11 +511,11 @@ class RawToBronzeJob:
         if not paths:
             return []
 
-        prev = self._spark.conf.get("spark.sql.files.ignoreMissingFiles", "false")
         out: List[dict] = []
         try:
-            self._spark.conf.set("spark.sql.files.ignoreMissingFiles", "true")
-            rows = (self._spark.read.text(paths, wholetext=True)
+            rows = (self._spark.read
+                    .option("ignoreMissingFiles", "true")   # reader option, NOT session conf
+                    .text(paths, wholetext=True)
                     .withColumn("_path", input_file_name())
                     .collect())
             for r in rows:
@@ -528,8 +529,6 @@ class RawToBronzeJob:
                 f"parallel receipt read failed for {prefix} ({type(e).__name__}: {e}) "
                 f"— falling back to sequential")
             return self._list_receipts_sequential(paths)
-        finally:
-            self._spark.conf.set("spark.sql.files.ignoreMissingFiles", prev)
 
     def _list_receipts_sequential(self, paths: List[str]) -> List[dict]:
         """Fallback: per-file fs_head + json.loads (the original path)."""

@@ -591,10 +591,12 @@ class BronzeWriter:
         return pd.Series(vals, dtype="object")
 
     def _spark_append_arrow(self, records: List[dict], table_name: str, table_schema) -> None:
-        """Arrow/pandas fast append. Session tz pinned to UTC + arrow fallback
-        enabled during the write; confs restored in finally (swallowing restore
-        errors so a *successful* commit can never be re-raised into a double
-        write)."""
+        """Arrow/pandas fast append. NO session-conf juggling — timestamps are
+        tz-aware UTC (see _pandas_series) so the stored instant is unambiguous
+        regardless of session timeZone, and on serverless Spark Connect several
+        file/session confs are read-restricted (get/set throws). Spark Connect
+        transports pandas via Arrow natively; if any column can't convert, the
+        dispatcher's except falls back to the proven row path."""
         import pandas as pd
         full_table = f"{self._catalog}.{self._schema}.{table_name}"
 
@@ -607,23 +609,8 @@ class BronzeWriter:
         }
         pdf = pd.DataFrame(cols)   # column order follows schema field order
 
-        conf = self._spark.conf
-        prev_tz    = conf.get("spark.sql.session.timeZone", "UTC")
-        prev_arrow = conf.get("spark.sql.execution.arrow.pyspark.enabled", "false")
-        prev_fb    = conf.get("spark.sql.execution.arrow.pyspark.fallback.enabled", "true")
-        try:
-            conf.set("spark.sql.session.timeZone", "UTC")
-            conf.set("spark.sql.execution.arrow.pyspark.enabled", "true")
-            conf.set("spark.sql.execution.arrow.pyspark.fallback.enabled", "true")
-            df = self._spark.createDataFrame(pdf, schema=table_schema)
-            df.write.format("delta").mode("append").saveAsTable(full_table)
-        finally:
-            try:
-                conf.set("spark.sql.session.timeZone", prev_tz)
-                conf.set("spark.sql.execution.arrow.pyspark.enabled", prev_arrow)
-                conf.set("spark.sql.execution.arrow.pyspark.fallback.enabled", prev_fb)
-            except Exception:   # noqa: BLE001 — restore best-effort, never mask a commit
-                pass
+        df = self._spark.createDataFrame(pdf, schema=table_schema)
+        df.write.format("delta").mode("append").saveAsTable(full_table)
         logger.debug(f"Arrow-appended {len(records)} rows to {full_table}")
 
     def _spark_append_rows(self, records: List[dict], table_name: str, table_schema) -> None:
