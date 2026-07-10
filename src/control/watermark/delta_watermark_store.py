@@ -129,6 +129,76 @@ class DeltaWatermarkStore(WatermarkStore):
             f"records={record_count}, mode={mode}, status={status}"
         )
 
+    def update_watermarks_bulk(self, entries: List[dict]) -> None:
+        """Set-based watermark upsert — ONE MERGE for the whole run instead of
+        one per instrument. Dates widen via LEAST/GREATEST in SQL (so we also
+        skip the per-instrument get_watermark read); record_count is additive
+        (t.record_count + rows_written this run). Local mode falls back to the
+        ABC loop for tests."""
+        if not entries:
+            return
+        if self._mode == "local":
+            super().update_watermarks_bulk(entries)
+            return
+        self._spark_upsert_bulk(entries)
+
+    def _spark_upsert_bulk(self, entries: List[dict]) -> None:
+        from pyspark.sql.types import (
+            StructType, StructField, LongType, StringType, DateType, TimestampType,
+        )
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        schema = StructType([
+            StructField("instrument_id",  LongType(),      False),
+            StructField("stream",         StringType(),    False),
+            StructField("bar_interval",   StringType(),    True),
+            StructField("run_min_date",   DateType(),      True),
+            StructField("run_max_date",   DateType(),      True),
+            StructField("rows_written",   LongType(),      False),
+            StructField("last_batch_id",  StringType(),    True),
+            StructField("last_load_type", StringType(),    True),
+            StructField("vendor",         StringType(),    True),
+            StructField("now_ts",         TimestampType(), False),
+        ])
+        rows = [(
+            int(e["instrument_id"]), e["stream"], e.get("interval", ""),
+            e["run_min_date"], e["run_max_date"], int(e["rows_written"]),
+            e["batch_id"], e["mode"], e.get("vendor"), now,
+        ) for e in entries]
+        df = self._spark.createDataFrame(rows, schema=schema)
+        df.createOrReplaceTempView("_wm_bulk")
+
+        # Note: buffer holds exactly one row per instrument+stream (grouped in the
+        # job), so no multi-match. LEAST/GREATEST skip NULLs, so widening is safe
+        # even against a pre-existing row.
+        self._spark.sql(f"""
+            MERGE INTO {self._table} AS t
+            USING _wm_bulk AS s
+            ON t.instrument_id = s.instrument_id AND t.stream = s.stream
+            WHEN MATCHED THEN UPDATE SET
+                t.bar_interval         = s.bar_interval,
+                t.earliest_date        = LEAST(t.earliest_date, s.run_min_date),
+                t.latest_date          = GREATEST(t.latest_date, s.run_max_date),
+                t.last_run_at          = s.now_ts,
+                t.record_count         = t.record_count + s.rows_written,
+                t.last_batch_id        = s.last_batch_id,
+                t.last_load_type       = s.last_load_type,
+                t.status               = 'active',
+                t.consecutive_failures = 0,
+                t.last_error           = NULL,
+                t.vendor               = s.vendor,
+                t.updated_at           = s.now_ts
+            WHEN NOT MATCHED THEN INSERT (
+                instrument_id, stream, bar_interval, earliest_date, latest_date,
+                last_run_at, record_count, last_batch_id, last_load_type,
+                status, consecutive_failures, last_error, vendor, created_at, updated_at
+            ) VALUES (
+                s.instrument_id, s.stream, s.bar_interval, s.run_min_date, s.run_max_date,
+                s.now_ts, s.rows_written, s.last_batch_id, s.last_load_type,
+                'active', 0, NULL, s.vendor, s.now_ts, s.now_ts
+            )
+        """)
+        logger.info(f"Watermark bulk upsert: {len(entries)} instrument(s) in one MERGE")
+
     def list_watermarks(self, stream: Optional[str] = None) -> List[IngestionWatermarkRecord]:
         """Return all watermarks, optionally filtered by stream."""
         if self._mode == "local":

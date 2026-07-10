@@ -499,67 +499,139 @@ class BronzeWriter:
 
     def _spark_append(self, records: List[dict], table_name: str) -> None:
         """
-        Append records to Delta table using Spark.
-
-        Uses the existing Delta table schema to create the DataFrame — avoids:
-          - PySparkValueError: CANNOT_DETERMINE_TYPE (all-None columns)
-          - PySparkTypeError: FIELD_DATA_TYPE_UNACCEPTABLE (string→DateType)
-
-        Strategy:
-          1. Read existing table schema from Delta metadata (not data scan)
-          2. Align each record dict to schema with correct Python types
-          3. Create DataFrame with explicit schema — no type inference
-          4. Append to Delta table
+        Append records to a Delta table. Tries the Arrow/pandas fast path first
+        (10–100× faster than row-by-row pickling of ~4k-row batches) and falls
+        back to the proven row path on ANY error — so correctness NEVER depends
+        on Arrow succeeding. Schema is read once and shared by both paths.
         """
-        from datetime import date as _date, datetime as _datetime
+        table_schema = self._read_table_schema(table_name)
+        try:
+            self._spark_append_arrow(records, table_name, table_schema)
+            return
+        except Exception as e:   # noqa: BLE001 — Arrow is a pure optimisation
+            logger.warning(
+                f"Arrow append failed ({type(e).__name__}: {e}) — "
+                f"falling back to row path (correct, slower)."
+            )
+        self._spark_append_rows(records, table_name, table_schema)
+
+    def _read_table_schema(self, table_name: str):
+        """Read the Delta table schema (metadata, not a data scan). DESCRIBE
+        fallback covers empty tables where .schema can fail on some versions."""
         from pyspark.sql.types import (
             StructType, StructField, StringType, DoubleType,
-            LongType, IntegerType, BooleanType, DateType, TimestampType
+            LongType, IntegerType, BooleanType, DateType, TimestampType,
         )
-
         full_table = f"{self._catalog}.{self._schema}.{table_name}"
-
-        # Step 1: Get existing table schema from Delta metadata.
-        # Use DESCRIBE to get schema even when table is empty —
-        # spark.table(table).schema fails on empty tables in some Spark versions.
         try:
             table_schema = self._spark.table(full_table).schema
             if not table_schema.fields:
                 raise ValueError("Empty schema returned")
+            return table_schema
         except Exception as e:
             logger.warning(
-                f"Could not read schema from {full_table}: {e}. "
-                f"Building schema from DESCRIBE."
+                f"Could not read schema from {full_table}: {e}. Building from DESCRIBE."
             )
-            try:
-                # Fallback: build schema from DESCRIBE TABLE
-                desc_df = self._spark.sql(f"DESCRIBE TABLE {full_table}")
-                type_map_str = {
-                    "string": StringType(), "double": DoubleType(),
-                    "bigint": LongType(), "int": IntegerType(),
-                    "boolean": BooleanType(), "date": DateType(),
-                    "timestamp": TimestampType(),
-                }
-                fields = []
-                for row in desc_df.collect():
-                    col_name = row["col_name"]
-                    col_type = row["data_type"].lower().strip()
-                    if col_name and not col_name.startswith("#"):
-                        spark_type = type_map_str.get(col_type, StringType())
-                        fields.append(StructField(col_name, spark_type, True))
-                table_schema = StructType(fields)
-                if not fields:
-                    raise ValueError("DESCRIBE returned no fields")
-            except Exception as e2:
-                logger.error(
-                    f"Cannot determine schema for {full_table}: {e2}. "
-                    f"Aborting write to prevent data corruption."
-                )
-                raise
+            desc_df = self._spark.sql(f"DESCRIBE TABLE {full_table}")
+            type_map_str = {
+                "string": StringType(), "double": DoubleType(),
+                "bigint": LongType(), "int": IntegerType(),
+                "boolean": BooleanType(), "date": DateType(),
+                "timestamp": TimestampType(),
+            }
+            fields = []
+            for row in desc_df.collect():
+                col_name = row["col_name"]
+                col_type = row["data_type"].lower().strip()
+                if col_name and not col_name.startswith("#"):
+                    fields.append(StructField(
+                        col_name, type_map_str.get(col_type, StringType()), True))
+            if not fields:
+                raise ValueError(f"DESCRIBE returned no fields for {full_table}")
+            return StructType(fields)
 
-        # Step 2: Align each record to the table schema with correct types.
-        # DateType requires python datetime.date (not string).
-        # All-None columns are preserved as None — schema enforces the type.
+    @staticmethod
+    def _pandas_series(vals: list, type_name: str):
+        """Build one pandas Series per Spark type, choosing dtypes that preserve
+        null-vs-NaN and avoid tz/date shifting (see the type-mapping design):
+          Double  -> Float64 (nullable, NA≠NaN)   Long/Int -> Int64 (nullable)
+          Boolean -> boolean (nullable)           String   -> string (nullable)
+          Date    -> object of datetime.date      Timestamp-> datetime64[ns, UTC]
+        """
+        import pandas as pd
+        from datetime import date as _date, datetime as _datetime
+
+        def _f(v):
+            try: return float(v)
+            except (TypeError, ValueError): return None
+
+        def _i(v):
+            try: return int(v)
+            except (TypeError, ValueError): return None
+
+        def _d(v):
+            if v is None: return None
+            if isinstance(v, _date) and not isinstance(v, _datetime): return v
+            try: return _date.fromisoformat(str(v)[:10])
+            except (TypeError, ValueError): return None
+
+        if type_name == "DoubleType":
+            return pd.array([None if v is None else _f(v) for v in vals], dtype="Float64")
+        if type_name in ("LongType", "IntegerType"):
+            return pd.array([None if v is None else _i(v) for v in vals], dtype="Int64")
+        if type_name == "BooleanType":
+            return pd.array([None if v is None else bool(v) for v in vals], dtype="boolean")
+        if type_name == "StringType":
+            return pd.array([None if v is None else str(v) for v in vals], dtype="string")
+        if type_name == "DateType":
+            return pd.Series([_d(v) for v in vals], dtype="object")
+        if type_name == "TimestampType":
+            # tz-aware UTC → carries the instant explicitly, immune to session tz.
+            return pd.to_datetime(pd.Series(vals), utc=True, errors="coerce")
+        return pd.Series(vals, dtype="object")
+
+    def _spark_append_arrow(self, records: List[dict], table_name: str, table_schema) -> None:
+        """Arrow/pandas fast append. Session tz pinned to UTC + arrow fallback
+        enabled during the write; confs restored in finally (swallowing restore
+        errors so a *successful* commit can never be re-raised into a double
+        write)."""
+        import pandas as pd
+        full_table = f"{self._catalog}.{self._schema}.{table_name}"
+
+        cols = {
+            field.name: self._pandas_series(
+                [rec.get(field.name) for rec in records],
+                type(field.dataType).__name__,
+            )
+            for field in table_schema.fields
+        }
+        pdf = pd.DataFrame(cols)   # column order follows schema field order
+
+        conf = self._spark.conf
+        prev_tz    = conf.get("spark.sql.session.timeZone", "UTC")
+        prev_arrow = conf.get("spark.sql.execution.arrow.pyspark.enabled", "false")
+        prev_fb    = conf.get("spark.sql.execution.arrow.pyspark.fallback.enabled", "true")
+        try:
+            conf.set("spark.sql.session.timeZone", "UTC")
+            conf.set("spark.sql.execution.arrow.pyspark.enabled", "true")
+            conf.set("spark.sql.execution.arrow.pyspark.fallback.enabled", "true")
+            df = self._spark.createDataFrame(pdf, schema=table_schema)
+            df.write.format("delta").mode("append").saveAsTable(full_table)
+        finally:
+            try:
+                conf.set("spark.sql.session.timeZone", prev_tz)
+                conf.set("spark.sql.execution.arrow.pyspark.enabled", prev_arrow)
+                conf.set("spark.sql.execution.arrow.pyspark.fallback.enabled", prev_fb)
+            except Exception:   # noqa: BLE001 — restore best-effort, never mask a commit
+                pass
+        logger.debug(f"Arrow-appended {len(records)} rows to {full_table}")
+
+    def _spark_append_rows(self, records: List[dict], table_name: str, table_schema) -> None:
+        """Row-path append (fallback). Aligns each dict to the schema with correct
+        Python types — DateType needs datetime.date, all-None columns stay None."""
+        from datetime import date as _date, datetime as _datetime
+        full_table = f"{self._catalog}.{self._schema}.{table_name}"
+
         aligned_records = []
         for record in records:
             aligned = {}
@@ -598,11 +670,10 @@ class BronzeWriter:
                     aligned[field.name] = None
             aligned_records.append(aligned)
 
-        # Step 3: Create DataFrame with explicit schema + append
         df = self._spark.createDataFrame(aligned_records, schema=table_schema)
         df.write.format("delta").mode("append").saveAsTable(full_table)
         logger.debug(
-            f"Appended {len(records)} records to {full_table} "
+            f"Row-appended {len(records)} records to {full_table} "
             f"using explicit schema ({len(table_schema.fields)} fields)"
         )
 

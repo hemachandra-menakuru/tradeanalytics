@@ -259,6 +259,11 @@ class RawToBronzeJob:
         # only for work the skip_dedup idempotency guard already re-absorbs.
         all_ingested_keys: List[str] = []
         all_job_log_rows: list = []
+        # Watermark states buffered here, flushed as ONE set-based MERGE below.
+        # ~12 scalar fields × N instruments ≈ <1MB even at 2k — safe in the driver
+        # (unlike buffering data rows). Per-instrument MERGE + get_watermark reads
+        # (65 × ~7s) collapse to a single MERGE.
+        self._wm_buffer: list = []
 
         for (instrument_id, symbol, interval), grp in groups.items():
             # ── fault isolation: one poison instrument must not block the rest ──
@@ -286,10 +291,19 @@ class RawToBronzeJob:
             if res["job_log_row"] is not None:
                 all_job_log_rows.append(res["job_log_row"])
 
-        # ── batched flush (marking is core → may raise; audit is non-fatal) ──
-        if not dry_run and all_ingested_keys:
+        # ── batched flush ──
+        # Watermark first (reflects Bronze truth), then mark, then audit. Each is
+        # idempotent; a crash between them self-heals on the next run.
+        if not dry_run and self._wm_buffer:
+            try:
+                self._watermarks.update_watermarks_bulk(self._wm_buffer)
+            except Exception as e:
+                # Non-fatal: dates self-heal via LEAST/GREATEST next run; count
+                # is informational. Better than failing a run whose data is safe.
+                logger.error(f"watermark bulk flush failed (non-fatal, self-heals): {e}")
+        if not dry_run and all_ingested_keys:   # core → may raise (re-run is safe)
             self._mark_ingested(all_ingested_keys)
-        if not dry_run and all_job_log_rows:
+        if not dry_run and all_job_log_rows:    # audit → non-fatal
             self._write_job_run_log_bulk(all_job_log_rows)
 
         summary = {"requests_ingested": ingested,
@@ -342,6 +356,9 @@ class RawToBronzeJob:
                 f"[{symbol}] batch {rep.batch_id} already in Bronze — skipping "
                 f"re-append (idempotent replay); will mark {len(grp)} chunk(s) INGESTED"
             )
+            # Still buffer the watermark (rows_written=0 → no double-count) using
+            # payload dates, so a crash-then-replay doesn't lose the watermark.
+            self._buffer_watermark_from_records(rep, records, rows_written=0)
             self._last_group_result["keys_to_mark"] = keys
             return
 
@@ -363,9 +380,11 @@ class RawToBronzeJob:
         if not vs.writable_records and not vs.rejected_records:
             logger.warning(
                 f"[{symbol}] 0 usable bars across {len(grp)} chunk(s) — marking "
-                f"INGESTED and writing zero-count watermark to stop re-INITIAL_LOAD"
+                f"INGESTED and buffering zero-count watermark to stop re-INITIAL_LOAD"
             )
-            self._write_zero_history_watermark(rep, grp)
+            end_dates = [r.end_date for r in grp if getattr(r, "end_date", None)]
+            sentinel = max(end_dates) if end_dates else date.today()
+            self._buffer_watermark(rep, sentinel, sentinel, rows_written=0)
             self._last_group_result["keys_to_mark"] = keys
             return
 
@@ -378,7 +397,10 @@ class RawToBronzeJob:
             skip_dedup=skip_dedup,
         )
 
-        self._update_watermark(rep, vs, wr)           # ONE watermark; count derived, no scan
+        # Buffer the watermark (flushed as one MERGE at end); rows_written is the
+        # delta appended THIS run — additive count, no per-instrument scan.
+        self._buffer_watermark_from_records(
+            rep, vs.writable_records, wr.records_written + wr.records_amended)
         completed = datetime.now(timezone.utc)
 
         self._last_group_result = {
@@ -467,17 +489,56 @@ class RawToBronzeJob:
     # ── internals ─────────────────────────────────────────────────────────────
 
     def _list_receipts(self, prefix: str) -> List[dict]:
-        out = []
+        """Read all receipts under a prefix in ONE parallel Spark job.
+
+        One fs_ls enumerates the .json paths (single API call), then
+        spark.read.text reads them distributed across the cluster — replacing the
+        old per-file sequential fs_head loop (~435 serial S3 GETs). wholetext=True
+        keeps each pretty-printed multi-line receipt intact; ignoreMissingFiles
+        tolerates a file that vanishes mid-read (can't happen during reconcile —
+        phase 1, single-concurrency, agent only adds — but defensive). A malformed
+        receipt fails only its own json.loads (logged + skipped), never the batch.
+        Any Spark-side failure falls back to the proven sequential path.
+        """
+        from pyspark.sql.functions import input_file_name
+
         try:
-            entries = list(self._fs_ls(prefix))
+            paths = [f.path for f in self._fs_ls(prefix)
+                     if f.path.rstrip("/").endswith(".json")]
         except Exception:
-            return out
-        for f in entries:
-            if f.path.rstrip("/").endswith(".json"):
+            return []
+        if not paths:
+            return []
+
+        prev = self._spark.conf.get("spark.sql.files.ignoreMissingFiles", "false")
+        out: List[dict] = []
+        try:
+            self._spark.conf.set("spark.sql.files.ignoreMissingFiles", "true")
+            rows = (self._spark.read.text(paths, wholetext=True)
+                    .withColumn("_path", input_file_name())
+                    .collect())
+            for r in rows:
                 try:
-                    out.append(json.loads(self._fs_head(f.path)))
+                    out.append(json.loads(r["value"]))
                 except Exception as e:
-                    logger.error(f"unreadable receipt {f.path}: {e}")
+                    logger.error(f"unreadable receipt {r['_path']}: {e}")
+            return out
+        except Exception as e:
+            logger.warning(
+                f"parallel receipt read failed for {prefix} ({type(e).__name__}: {e}) "
+                f"— falling back to sequential")
+            return self._list_receipts_sequential(paths)
+        finally:
+            self._spark.conf.set("spark.sql.files.ignoreMissingFiles", prev)
+
+    def _list_receipts_sequential(self, paths: List[str]) -> List[dict]:
+        """Fallback: per-file fs_head + json.loads (the original path)."""
+        out: List[dict] = []
+        for p in paths:
+            try:
+                out.append(json.loads(self._fs_head(p)))
+            except Exception as e:
+                logger.error(f"unreadable receipt {p}: {e}")
         return out
 
     def _batch_already_in_bronze(self, symbol: str, batch_id: str) -> bool:
@@ -504,43 +565,27 @@ class RawToBronzeJob:
             logger.warning(f"[{symbol}] idempotency check failed ({e}) — proceeding with write")
             return False
 
-    def _write_zero_history_watermark(self, rep, grp) -> None:
-        """Write a zero-count watermark for an instrument IBKR has no data for,
-        so the planner stops re-issuing INITIAL_LOAD. Sentinel date = the target
-        end-date of the requested range (NULL is unsafe — the store reads dates
-        unconditionally). Non-fatal: a watermark failure must not fail the group."""
-        try:
-            end_dates = [r.end_date for r in grp if getattr(r, "end_date", None)]
-            sentinel = max(end_dates) if end_dates else date.today()
-            self._watermarks.update_watermark(
-                instrument_id=rep.instrument_id, stream=self._stream_name,
-                interval=rep.bar_interval, earliest_date=sentinel, latest_date=sentinel,
-                record_count=0, batch_id=rep.batch_id,
-                mode=rep.load_type.lower(), status="success", vendor=rep.vendor,
-            )
-        except Exception as e:
-            logger.error(f"[{rep.symbol}] zero-history watermark write failed (non-fatal): {e}")
+    def _buffer_watermark(self, rep, min_d, max_d, rows_written: int) -> None:
+        """Append one watermark state to the buffer (flushed as one MERGE at end).
+        Widening (LEAST/GREATEST) and the additive count happen in the flush MERGE,
+        so no per-instrument read here."""
+        self._wm_buffer.append({
+            "instrument_id": int(rep.instrument_id), "stream": self._stream_name,
+            "interval": rep.bar_interval, "vendor": rep.vendor,
+            "batch_id": rep.batch_id, "mode": rep.load_type.lower(),
+            "run_min_date": min_d, "run_max_date": max_d,
+            "rows_written": int(rows_written),
+        })
 
-    def _update_watermark(self, r, vs, wr) -> None:
-        dates = [rec.get("bar_date") for rec in vs.writable_records if rec.get("bar_date")]
+    def _buffer_watermark_from_records(self, rep, records, rows_written: int) -> None:
+        """Buffer a watermark from a record list, deriving min/max bar_date.
+        No dates (empty list) → nothing buffered."""
+        dates = [r.get("bar_date") for r in records if r.get("bar_date")]
         if not dates:
             return
-        min_d, max_d = date.fromisoformat(min(dates)), date.fromisoformat(max(dates))
-        existing = self._watermarks.get_watermark(r.instrument_id, self._stream_name)
-        # Derive record_count from prior + rows just written — avoids a per-group
-        # COUNT(*) scan of Bronze. Skipped rows add nothing; written + amended are
-        # the only new physical rows for this instrument.
-        prior = existing.record_count if existing is not None else 0
-        if existing is not None:
-            min_d = min(min_d, existing.earliest_date)
-            max_d = max(max_d, existing.latest_date)
-        count = prior + wr.records_written + wr.records_amended
-        self._watermarks.update_watermark(
-            instrument_id=r.instrument_id, stream=self._stream_name,
-            interval=r.bar_interval, earliest_date=min_d, latest_date=max_d,
-            record_count=count, batch_id=r.batch_id,
-            mode=r.load_type.lower(), status="success", vendor=r.vendor,
-        )
+        self._buffer_watermark(
+            rep, date.fromisoformat(min(dates)), date.fromisoformat(max(dates)),
+            rows_written)
 
     def _mark_ingested(self, request_keys) -> None:
         """Bulk-mark LANDED → INGESTED in ONE MERGE (was one UPDATE per group).

@@ -182,3 +182,33 @@ def test_spark_mode_requires_spark_session():
 def test_implements_watermark_store_abc():
     store = DeltaWatermarkStore(mode="local")
     assert isinstance(store, WatermarkStore)
+
+
+# ---------------------------------------------------------------------------
+# Bulk upsert — locks the buffer-entry contract the job builds (local path)
+# ---------------------------------------------------------------------------
+
+def test_update_watermarks_bulk_local_applies_all_entries(store):
+    entries = [
+        {"instrument_id": 5, "stream": "daily", "interval": "1d", "vendor": "ibkr",
+         "batch_id": "b1", "mode": "initial_load",
+         "run_min_date": date(2011, 1, 3), "run_max_date": date(2026, 7, 9),
+         "rows_written": 3902},
+        {"instrument_id": 93, "stream": "daily", "interval": "1d", "vendor": "ibkr",
+         "batch_id": "b1", "mode": "initial_load",
+         "run_min_date": date(2012, 12, 10), "run_max_date": date(2026, 7, 9),
+         "rows_written": 3414},
+    ]
+    store.update_watermarks_bulk(entries)
+
+    w5 = store.get_watermark(5, "daily")
+    assert w5 is not None
+    assert w5.earliest_date == date(2011, 1, 3)
+    assert w5.latest_date == date(2026, 7, 9)
+    assert w5.record_count == 3902
+    assert store.get_watermark(93, "daily").record_count == 3414
+
+
+def test_update_watermarks_bulk_empty_is_noop(store):
+    store.update_watermarks_bulk([])   # must not raise
+    assert store.list_watermarks() == []
